@@ -124,7 +124,7 @@ class FastIntersectSearch(_PluginBase):
         "跨站高并发+单站3秒频控，流式流水线即出即洗，"
         "接管Web搜索、通知渠道点播与新建订阅首搜，原生规则组排序。"
     )
-    plugin_version: str = "2.7.0"
+    plugin_version: str = "2.7.1"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
@@ -1621,11 +1621,13 @@ class FastIntersectSearch(_PluginBase):
             f"分类={mediainfo.category}, 完结={is_ended}"
         )
 
-        # 整理中英搜索关键词
+        # 整理中英搜索关键词（原名缺失或与主标题相同（如中文原名）时回退英文译名，避免双语退化）
         keywords = [mediainfo.title]
         if self._bilingual_search:
-            en_title = getattr(mediainfo, "original_title", None) or getattr(mediainfo, "en_title", None)
-            if en_title and en_title.strip() and en_title.strip().lower() != mediainfo.title.lower():
+            en_title = getattr(mediainfo, "original_title", None)
+            if not en_title or not en_title.strip() or en_title.strip().lower() == mediainfo.title.strip().lower():
+                en_title = getattr(mediainfo, "en_title", None)
+            if en_title and en_title.strip() and en_title.strip().lower() != mediainfo.title.strip().lower():
                 keywords.append(en_title.strip())
 
         # 2. 获取有效站点列表
@@ -1644,9 +1646,12 @@ class FastIntersectSearch(_PluginBase):
             return
 
         # 站点按媒体类型剪裁：非动漫影视自动避开纯动漫站点 (如 MiKan)
-        is_anime = False
-        if mediainfo.category in ["日番", "国漫", "动漫"] or (hasattr(mediainfo, "genre_ids") and 16 in (mediainfo.genre_ids or [])):
-            is_anime = True
+        # 判定覆盖库分类（含“动画电影”等动画类目）与 TMDB 动画类型 (genre_id=16)，修复豆瓣源识别缺少 genre_ids 时的误跳过
+        category_str = str(mediainfo.category or "")
+        is_anime = (
+            any(key in category_str for key in ("动画", "动漫", "日番", "国漫"))
+            or (hasattr(mediainfo, "genre_ids") and 16 in (mediainfo.genre_ids or []))
+        )
 
         filtered_indexer_sites = []
         for s in indexer_sites:
@@ -1842,16 +1847,16 @@ class FastIntersectSearch(_PluginBase):
             for s in indexer_sites
         ]
 
-        # 整理标题搜索关键词
+        # 整理标题搜索关键词（识别媒体补充英文关键词；识别失败不阻塞主搜索）
         keywords = [title]
         if self._bilingual_search:
             try:
-                from app.chain.media import MediaChain
-                from app.domain.meta.metabase import MetaBase
-                rec_media = await MediaChain().async_recognize_media(meta=MetaBase(title=title))
+                rec_media = await MediaChain().async_recognize_media(meta=MetaInfo(title=title))
                 if rec_media:
-                    en_t = getattr(rec_media, "original_title", None) or getattr(rec_media, "en_title", None)
-                    if en_t and en_t.strip() and en_t.strip().lower() != title.lower():
+                    en_t = getattr(rec_media, "original_title", None)
+                    if not en_t or not en_t.strip() or en_t.strip().lower() == title.strip().lower():
+                        en_t = getattr(rec_media, "en_title", None)
+                    if en_t and en_t.strip() and en_t.strip().lower() != title.strip().lower():
                         keywords.append(en_t.strip())
             except Exception:
                 pass
@@ -1909,7 +1914,19 @@ class FastIntersectSearch(_PluginBase):
 
         await asyncio.gather(*producer_tasks, return_exceptions=True)
 
-        contexts = all_contexts[:self._default_top_k] if self._default_top_k > 0 else all_contexts
+        # 全局最终收敛排序：完全委托系统原生 TorrentHelper.sort_torrents（与精准搜索路径保持一致）
+        try:
+            sorted_all = TorrentHelper.sort_torrents(all_contexts)
+        except Exception as e:
+            logger.warning(f"调用系统 TorrentHelper.sort_torrents 异常，回退排序: {e}")
+            sorted_all = sorted(
+                all_contexts,
+                key=lambda x: (getattr(x.torrent_info, "pri_order", 0) or 0, getattr(x.torrent_info, "seeders", 0) or 0),
+                reverse=True,
+            )
+        logger.info(f"标题搜索全局收敛排序完成: {len(sorted_all)} 条资源已统一排序")
+
+        contexts = sorted_all[:self._default_top_k] if self._default_top_k > 0 else sorted_all
         total_cost = round(time.time() - t0, 2)
         logger.info(f"标题流式搜索完成: 总耗时 {total_cost}s，交付资源 {len(contexts)} 个")
 
@@ -1961,10 +1978,16 @@ class FastIntersectSearch(_PluginBase):
 
         mediainfo = None
         try:
-            from app.domain.meta.metabase import MetaBase
-            meta_obj = MetaBase(title=title)
+            meta_obj = MetaInfo(title=title)
+            logger.info(
+                f"智能体工具识别开始: title={title!r}, meta.name={getattr(meta_obj, 'name', None)!r}, meta.type={getattr(meta_obj, 'type', None)}"
+            )
             mediainfo = await MediaChain().async_recognize_media(meta=meta_obj)
-        except Exception:
+            logger.info(
+                f"智能体工具识别结果: {'命中 《' + mediainfo.title + '》' if mediainfo else '未命中'}"
+            )
+        except Exception as e:
+            logger.warning(f"智能体工具识别异常，回退标题搜索: {e}", exc_info=True)
             mediainfo = None
 
         contexts: List[Context] = []
