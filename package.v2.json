@@ -1,14 +1,15 @@
 {
   "FastIntersectSearch": {
     "name": "极速交叉搜索",
-    "description": "跨站点并发检索，单站点3秒安全防刷频控，流式流水线即出即洗，接管网页端搜索流与通知渠道交互搜索，支持中英双语搜索开关，前置过滤前置，MetaInfo单次解析零拷贝复用，排序完全交由系统原生模块标准化处理，支持独立插件日志。",
-    "labels": "搜索,下载,效率,智能体",
-    "version": "1.5.0",
+    "description": "跨站点并发检索，单站点3秒安全防刷频控，流式流水线即出即洗，接管网页端搜索流与通知渠道交互搜索，新增新建订阅首次搜索极速加速注入，支持中英双语搜索开关，前置过滤前置，MetaInfo单次解析零拷贝复用，排序完全交由系统原生模块标准化处理，支持独立插件日志。",
+    "labels": "搜索,下载,效率,智能体,订阅",
+    "version": "1.6.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png",
     "author": "CRY1221",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.6.0": "重大补强：实现「新建订阅首次搜索加速注入」（accelerate_new_subscribe 开关）。仅针对新建订阅（state='N'）触发时进行极速并发预取并直接喂给原生结算闭包，快速完成下载决策并平稳推进订阅状态至 R，后续日常巡检追更 100% 原路放行无任何冲突",
       "v1.5.0": "新增特性：增加「中英双语搜索」表单开关（bilingual_search）。开启后同时检索中文与英文原名/译名；关闭后仅检索单一主标题，大幅减少站点轮询与耗时",
       "v1.4.0": "功能扩展：全面接入通知渠道交互搜索（SearchChain.process / async_process），微信/Telegram点播同样享受秒级并发流式清洗与系统原生排序",
       "v1.3.0": "重大重构：全面改造为单站即出即洗的流式流水线（Streaming Pipeline）架构；前置过滤前置，MetaInfo严格单次解析与零开销复用；彻底剔除插件内私自加分排序，完全回归系统原生TorrentHelper标准化排序；支持最大展示数设为0全量展示；精简多余开关并修复SSE序列化问题",
