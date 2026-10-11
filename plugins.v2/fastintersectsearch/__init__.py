@@ -83,12 +83,12 @@ class FastIntersectSearch(_PluginBase):
     极速搜索主插件：实现网页前端搜索接管与流式流水线加速。
     """
 
-    plugin_name: str = "极速交叉搜索"
+    plugin_name: str = "极速搜索"
     plugin_desc: str = (
-        "跨站并发+单站3秒频控，流式流水线即出即洗，"
-        "MetaInfo单次复用，Rust前置初筛与定级，完结全集包提权。"
+        "跨站高并发+单站3秒频控，流式流水线即出即洗，"
+        "接管Web搜索、通知渠道点播与新建订阅首搜，原生规则组排序。"
     )
-    plugin_version: str = "1.7.0"
+    plugin_version: str = "1.8.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
@@ -655,7 +655,7 @@ class FastIntersectSearch(_PluginBase):
                                         "component": "VSwitch",
                                         "props": {
                                             "model": "enabled",
-                                            "label": "启用极速并发搜索",
+                                            "label": "启用极速搜索",
                                             "color": "primary",
                                         },
                                     }
@@ -815,25 +815,49 @@ class FastIntersectSearch(_PluginBase):
         }
         return form, default
 
+    def _get_site_icon_map(self) -> Dict[str, str]:
+        """获取各站点的 Base64/URL 图标映射。"""
+        icon_map = {}
+        try:
+            from app.db.models.siteicon import SiteIcon
+            from app.db import get_db
+            db = next(get_db())
+            icons = db.query(SiteIcon).all()
+            for item in icons:
+                if item.name and item.base64:
+                    icon_map[item.name] = item.base64
+                elif item.name and item.url:
+                    icon_map[item.name] = item.url
+        except Exception:
+            pass
+        return icon_map
+
     def get_page(self) -> Optional[List[dict]]:
-        """插件详情页展示：站点响应耗时统计大盘。"""
+        """
+        插件详情页展示：VS Code 深色极客风站点响应性能看板。
+        配色风格：VS Code Dark+ (深灰底 #1e1e1e、代码蓝 #4ec9b0/#569cd6、终端绿 #4fc1ff/#89d185、语法橙黄 #dcdcaa/#ce9178)
+        """
         if not self._enabled:
             return None
 
-        # 读取站点耗时统计
+        # 读取站点耗时统计与图标
         site_stats = self._site_stats if hasattr(self, "_site_stats") and self._site_stats else (self.get_data("site_stats") or {})
+        icon_map = self._get_site_icon_map()
+
         now = time.time()
         three_days_ago = now - 3 * 86400
 
-        # 构建表格行
+        total_sites = len(site_stats)
+        fast_sites = 0
+        sum_avg = 0.0
+
         table_rows = []
-        # 按站点名排序展示
         for site_name, s_info in sorted(site_stats.items(), key=lambda x: x[0]):
             last_cost = s_info.get("last_cost", 0.0)
             last_time = s_info.get("last_time", 0)
             history = s_info.get("history") or []
 
-            # 计算3天内平均耗时
+            # 3天平均
             valid_costs = [item.get("c", 0.0) for item in history if item.get("t", 0) >= three_days_ago and item.get("c") is not None]
             if valid_costs:
                 avg_cost = round(sum(valid_costs) / len(valid_costs), 2)
@@ -842,33 +866,142 @@ class FastIntersectSearch(_PluginBase):
                 avg_cost = last_cost
                 sample_count = 1 if last_cost > 0 else 0
 
-            # 格式化上次时间
+            if avg_cost < 3.0 and avg_cost > 0:
+                fast_sites += 1
+            if avg_cost > 0:
+                sum_avg += avg_cost
+
+            # 相对时间
             if last_time > 0:
                 elapsed = int(now - last_time)
                 if elapsed < 60:
-                    time_str = f"{elapsed} 秒前"
+                    time_str = f"{elapsed}s ago"
                 elif elapsed < 3600:
-                    time_str = f"{elapsed // 60} 分钟前"
+                    time_str = f"{elapsed // 60}m ago"
                 elif elapsed < 86400:
-                    time_str = f"{elapsed // 3600} 小时前"
+                    time_str = f"{elapsed // 3600}h ago"
                 else:
-                    time_str = f"{elapsed // 86400} 天前"
+                    time_str = f"{elapsed // 86400}d ago"
             else:
-                time_str = "暂无记录"
+                time_str = "--"
 
-            # 上次耗时样式
-            cost_class = "text-success font-weight-bold" if last_cost < 3.0 else ("text-warning font-weight-bold" if last_cost < 8.0 else "text-error font-weight-bold")
-            avg_class = "text-success" if avg_cost < 3.0 else ("text-warning" if avg_cost < 8.0 else "text-error")
+            # 图标元素
+            site_icon_src = icon_map.get(site_name)
+            avatar_content = []
+            if site_icon_src:
+                avatar_content.append({
+                    "component": "VImg",
+                    "props": {
+                        "src": site_icon_src,
+                        "width": 20,
+                        "height": 20,
+                    },
+                })
+            else:
+                avatar_content.append({
+                    "component": "span",
+                    "props": {"style": "font-size: 11px; font-weight: bold; color: #569cd6;"},
+                    "text": site_name[:1],
+                })
+
+            site_cell = {
+                "component": "td",
+                "props": {"style": "padding: 10px 16px; border-bottom: 1px solid #2d2d2d;"},
+                "content": [
+                    {
+                        "component": "div",
+                        "props": {"style": "display: flex; align-items: center; gap: 10px;"},
+                        "content": [
+                            {
+                                "component": "VAvatar",
+                                "props": {
+                                    "size": 26,
+                                    "rounded": "sm",
+                                    "style": "background-color: #252526; border: 1px solid #333333; flex-shrink: 0;",
+                                },
+                                "content": avatar_content,
+                            },
+                            {
+                                "component": "span",
+                                "props": {"style": "color: #d4d4d4; font-weight: 600; font-family: monospace; font-size: 13px;"},
+                                "text": site_name,
+                            },
+                        ],
+                    }
+                ],
+            }
+
+            # 状态标签与数值
+            if last_cost < 2.0:
+                cost_color = "#4ec9b0"
+                tag_bg = "rgba(78, 201, 176, 0.15)"
+                tag_text = "FAST"
+            elif last_cost < 6.0:
+                cost_color = "#dcdcaa"
+                tag_bg = "rgba(220, 220, 170, 0.15)"
+                tag_text = "NORMAL"
+            else:
+                cost_color = "#f44747"
+                tag_bg = "rgba(244, 71, 71, 0.15)"
+                tag_text = "SLOW"
+
+            last_cost_cell = {
+                "component": "td",
+                "props": {"style": "padding: 10px 16px; border-bottom: 1px solid #2d2d2d;"},
+                "content": [
+                    {
+                        "component": "div",
+                        "props": {"style": "display: flex; align-items: center; gap: 8px;"},
+                        "content": [
+                            {
+                                "component": "span",
+                                "props": {
+                                    "style": (
+                                        f"background: {tag_bg}; color: {cost_color}; "
+                                        "font-size: 10px; font-weight: 700; padding: 2px 6px; "
+                                        "border-radius: 4px; font-family: monospace;"
+                                    )
+                                },
+                                "text": tag_text,
+                            },
+                            {
+                                "component": "span",
+                                "props": {"style": f"color: {cost_color}; font-family: monospace; font-weight: bold; font-size: 13px;"},
+                                "text": f"{last_cost:.2f}s",
+                            },
+                        ],
+                    }
+                ],
+            }
+
+            avg_color = "#4ec9b0" if avg_cost < 3.0 else ("#dcdcaa" if avg_cost < 7.0 else "#f44747")
+            avg_cost_cell = {
+                "component": "td",
+                "props": {"style": "padding: 10px 16px; border-bottom: 1px solid #2d2d2d;"},
+                "content": [
+                    {
+                        "component": "span",
+                        "props": {"style": f"color: {avg_color}; font-family: monospace; font-size: 13px;"},
+                        "text": f"{avg_cost:.2f}s ",
+                    },
+                    {
+                        "component": "span",
+                        "props": {"style": "color: #6a9955; font-size: 11px; font-family: monospace;"},
+                        "text": f"// {sample_count} samples",
+                    },
+                ],
+            }
+
+            time_cell = {
+                "component": "td",
+                "props": {"style": "padding: 10px 16px; border-bottom: 1px solid #2d2d2d; color: #858585; font-family: monospace; font-size: 12px;"},
+                "text": time_str,
+            }
 
             table_rows.append({
                 "component": "tr",
-                "props": {"class": "text-sm"},
-                "content": [
-                    {"component": "td", "props": {"class": "font-weight-medium"}, "text": site_name},
-                    {"component": "td", "props": {"class": cost_class}, "text": f"{last_cost:.2f} s"},
-                    {"component": "td", "props": {"class": avg_class}, "text": f"{avg_cost:.2f} s ({sample_count}次采样)"},
-                    {"component": "td", "props": {"class": "text-medium-emphasis"}, "text": time_str},
-                ],
+                "props": {"style": "transition: background 0.2s;", "class": "hover:bg-slate-800"},
+                "content": [site_cell, last_cost_cell, avg_cost_cell, time_cell],
             })
 
         if not table_rows:
@@ -881,12 +1014,20 @@ class FastIntersectSearch(_PluginBase):
                             "props": {"cols": 12},
                             "content": [
                                 {
-                                    "component": "VAlert",
+                                    "component": "div",
                                     "props": {
-                                        "type": "info",
-                                        "variant": "tonal",
-                                        "text": "暂无站点响应耗时统计数据，发起一次搜索后将在此自动生成大盘。",
+                                        "style": (
+                                            "background-color: #1e1e1e; border: 1px solid #2d2d2d; "
+                                            "border-radius: 8px; padding: 24px; text-align: center; color: #858585; "
+                                            "font-family: monospace; font-size: 13px;"
+                                        )
                                     },
+                                    "content": [
+                                        {"component": "span", "props": {"style": "color: #569cd6;"}, "text": "const "},
+                                        {"component": "span", "props": {"style": "color: #9cdcfe;"}, "text": "status = "},
+                                        {"component": "span", "props": {"style": "color: #ce9178;"}, "text": "\"NO_TELEMETRY_DATA_YET\""},
+                                        {"component": "div", "props": {"style": "margin-top: 8px; color: #6a9955;"}, "text": "// 暂无测速遥测数据，发起一次搜索后自动生成看板"},
+                                    ],
                                 }
                             ],
                         }
@@ -894,17 +1035,84 @@ class FastIntersectSearch(_PluginBase):
                 }
             ]
 
+        # 统计卡片指标
+        overall_avg = round(sum_avg / max(1, total_sites), 2)
+        stat_cards = [
+            {
+                "label": "TRACKED_SITES",
+                "val": f"{total_sites}",
+                "color": "#569cd6",
+                "desc": "// 参与流式并发的活跃PT站",
+            },
+            {
+                "label": "FAST_NODES (<3s)",
+                "val": f"{fast_sites} / {total_sites}",
+                "color": "#4ec9b0",
+                "desc": "// 达成秒级即出即洗的极速站",
+            },
+            {
+                "label": "CLUSTER_AVG_LATENCY",
+                "val": f"{overall_avg}s",
+                "color": "#dcdcaa",
+                "desc": "// 全站并发网络平响基线",
+            },
+        ]
+
+        card_cols = []
+        for c in stat_cards:
+            card_cols.append({
+                "component": "VCol",
+                "props": {"cols": 12, "md": 4},
+                "content": [
+                    {
+                        "component": "div",
+                        "props": {
+                            "style": (
+                                "background-color: #1e1e1e; border: 1px solid #2d2d2d; "
+                                "border-left: 3px solid " + c["color"] + "; "
+                                "border-radius: 6px; padding: 14px 18px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"
+                            )
+                        },
+                        "content": [
+                            {
+                                "component": "div",
+                                "props": {"style": "color: #858585; font-size: 11px; font-weight: 700; font-family: monospace; letter-spacing: 0.5px;"},
+                                "text": c["label"],
+                            },
+                            {
+                                "component": "div",
+                                "props": {"style": f"color: {c['color']}; font-size: 24px; font-weight: 800; font-family: monospace; margin: 4px 0;"},
+                                "text": c["val"],
+                            },
+                            {
+                                "component": "div",
+                                "props": {"style": "color: #6a9955; font-size: 11px; font-family: monospace;"},
+                                "text": c["desc"],
+                            },
+                        ],
+                    }
+                ],
+            })
+
+        header_th_style = "padding: 12px 16px; color: #9cdcfe; font-weight: 700; font-family: monospace; font-size: 12px; border-bottom: 2px solid #333333;"
         header_row = {
             "component": "thead",
             "content": [
-                {"component": "th", "props": {"class": "text-start font-weight-bold"}, "text": "站点名称"},
-                {"component": "th", "props": {"class": "text-start font-weight-bold"}, "text": "上次响应时间"},
-                {"component": "th", "props": {"class": "text-start font-weight-bold"}, "text": "3天内平均响应时间"},
-                {"component": "th", "props": {"class": "text-start font-weight-bold"}, "text": "上次测速时间"},
+                {"component": "th", "props": {"style": header_th_style}, "text": "PT_INDEXER"},
+                {"component": "th", "props": {"style": header_th_style}, "text": "LAST_LATENCY"},
+                {"component": "th", "props": {"style": header_th_style}, "text": "3D_AVG_BENCHMARK"},
+                {"component": "th", "props": {"style": header_th_style}, "text": "LAST_PROBED"},
             ],
         }
 
         page = [
+            # 顶部统计小卡片
+            {
+                "component": "VRow",
+                "props": {"class": "mb-3"},
+                "content": card_cols,
+            },
+            # 下方主看板表格
             {
                 "component": "VRow",
                 "content": [
@@ -913,12 +1121,45 @@ class FastIntersectSearch(_PluginBase):
                         "props": {"cols": 12},
                         "content": [
                             {
-                                "component": "VCard",
-                                "props": {"elevation": 1},
+                                "component": "div",
+                                "props": {
+                                    "style": (
+                                        "background-color: #1e1e1e; border: 1px solid #2d2d2d; "
+                                        "border-radius: 8px; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.4);"
+                                    )
+                                },
                                 "content": [
                                     {
+                                        "component": "div",
+                                        "props": {
+                                            "style": (
+                                                "background-color: #252526; padding: 10px 16px; "
+                                                "display: flex; align-items: center; justify-content: space-between; "
+                                                "border-bottom: 1px solid #333333;"
+                                            )
+                                        },
+                                        "content": [
+                                            {
+                                                "component": "div",
+                                                "props": {"style": "display: flex; align-items: center; gap: 8px;"},
+                                                "content": [
+                                                    {"component": "span", "props": {"style": "display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #4ec9b0;"}},
+                                                    {"component": "span", "props": {"style": "color: #cccccc; font-size: 12px; font-weight: 700; font-family: monospace;"}, "text": "telemetry_site_benchmark.json"},
+                                                ],
+                                            },
+                                            {
+                                                "component": "span",
+                                                "props": {"style": "color: #6a9955; font-size: 11px; font-family: monospace;"},
+                                                "text": "// auto-refreshed on search",
+                                            },
+                                        ],
+                                    },
+                                    {
                                         "component": "VTable",
-                                        "props": {"hover": True},
+                                        "props": {
+                                            "hover": True,
+                                            "style": "background-color: #1e1e1e; width: 100%;",
+                                        },
                                         "content": [
                                             header_row,
                                             {
@@ -926,13 +1167,13 @@ class FastIntersectSearch(_PluginBase):
                                                 "content": table_rows,
                                             },
                                         ],
-                                    }
+                                    },
                                 ],
                             }
                         ],
                     }
                 ],
-            }
+            },
         ]
         return page
 
