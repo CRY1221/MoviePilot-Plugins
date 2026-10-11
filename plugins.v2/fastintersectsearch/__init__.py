@@ -88,7 +88,7 @@ class FastIntersectSearch(_PluginBase):
         "跨站并发+单站3秒频控，流式流水线即出即洗，"
         "MetaInfo单次复用，Rust前置初筛与定级，完结全集包提权。"
     )
-    plugin_version: str = "1.6.0"
+    plugin_version: str = "1.7.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
@@ -99,6 +99,7 @@ class FastIntersectSearch(_PluginBase):
     _default_top_k: int = 0
     _search_timeout: int = 15
     _site_sleep_seconds: float = 3.0
+    _site_stats: Dict[str, Any] = {}
 
     # 原始 SearchChain / SearchScan 方法句柄备份
     _orig_search_page_events = None
@@ -125,6 +126,7 @@ class FastIntersectSearch(_PluginBase):
         self._default_top_k = int(config.get("default_top_k", 0) or 0)
         self._search_timeout = int(config.get("search_timeout", 15) or 15)
         self._site_sleep_seconds = float(config.get("site_sleep_seconds", 3.0) or 3.0)
+        self._site_stats = self.get_data("site_stats") or {}
 
         # 备份并安装/卸载系统 SearchChain 钩子
         self._backup_original_methods()
@@ -588,6 +590,34 @@ class FastIntersectSearch(_PluginBase):
             except Exception:
                 pass
 
+    def _record_site_cost(self, site_name: str, cost: float, success: bool = True) -> None:
+        """记录站点单次请求耗时，并持久化统计（保留最近3天数据）。"""
+        try:
+            now = time.time()
+            three_days_ago = now - 3 * 86400
+
+            if not hasattr(self, "_site_stats") or not isinstance(self._site_stats, dict):
+                self._site_stats = self.get_data("site_stats") or {}
+
+            site_data = self._site_stats.setdefault(site_name, {
+                "last_cost": 0.0,
+                "last_time": 0,
+                "history": [],
+            })
+
+            site_data["last_cost"] = round(cost, 2)
+            site_data["last_time"] = int(now)
+
+            history = site_data.get("history") or []
+            # 过滤掉超过3天的历史，并加入本次记录
+            valid_history = [item for item in history if item.get("t", 0) >= three_days_ago]
+            valid_history.append({"t": int(now), "c": round(cost, 2), "s": success})
+            site_data["history"] = valid_history[-100:]  # 最多保留100条采样
+
+            self.save_data("site_stats", self._site_stats)
+        except Exception as e:
+            logger.debug(f"记录站点响应耗时异常: {e}")
+
     def get_state(self) -> bool:
         """获取启用状态。"""
         return self._enabled
@@ -614,49 +644,163 @@ class FastIntersectSearch(_PluginBase):
                 "component": "VForm",
                 "content": [
                     {
-                        "component": "VSwitch",
-                        "props": {
-                            "model": "enabled",
-                            "label": "启用极速并发搜索插件（默认自动接管网页端搜索流与通知渠道点播）",
-                        },
+                        "component": "VRow",
+                        "props": {"class": "mb-2"},
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "enabled",
+                                            "label": "启用极速并发搜索",
+                                            "color": "primary",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "accelerate_new_subscribe",
+                                            "label": "新建订阅首次搜索加速",
+                                            "color": "primary",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "bilingual_search",
+                                            "label": "中英双语搜索",
+                                            "color": "primary",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
                     },
                     {
-                        "component": "VSwitch",
-                        "props": {
-                            "model": "accelerate_new_subscribe",
-                            "label": "新建订阅首次搜索加速（仅在新建订阅执行首次检索时注入秒级并发，完成后无缝切回原生）",
-                        },
+                        "component": "VDivider",
+                        "props": {"class": "my-4"},
                     },
                     {
-                        "component": "VSwitch",
-                        "props": {
-                            "model": "bilingual_search",
-                            "label": "中英双语搜索（开启后同时检索中文名与英文原名/译名；关闭后仅检索单一主标题）",
-                        },
+                        "component": "VRow",
+                        "props": {"class": "mb-2"},
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "site_sleep_seconds",
+                                            "label": "同站请求安全间隔 (秒)",
+                                            "placeholder": "3.0",
+                                            "type": "number",
+                                            "hint": "防刷频控，多轮请求强制等待间隔",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "search_timeout",
+                                            "label": "单站搜索超时时间 (秒)",
+                                            "placeholder": "15",
+                                            "type": "number",
+                                            "hint": "慢站超时保护，避免卡死整场检索",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "default_top_k",
+                                            "label": "最大呈现结果数",
+                                            "placeholder": "0",
+                                            "type": "number",
+                                            "hint": "0 表示不设上限，全量展示",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
                     },
                     {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "site_sleep_seconds",
-                            "label": "同站点连续请求等待间隔 (秒，防刷频控，默认 3.0)",
-                            "type": "number",
-                        },
+                        "component": "VDivider",
+                        "props": {"class": "my-4"},
                     },
                     {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "search_timeout",
-                            "label": "站点单次搜索超时时间 (秒，建议 12~15)",
-                            "type": "number",
-                        },
-                    },
-                    {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "default_top_k",
-                            "label": "搜索结果最大呈现数量 (填 0 不限制，全量展示)",
-                            "type": "number",
-                        },
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "class": "mb-3",
+                                        },
+                                        "content": [
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "text-subtitle-1 font-weight-bold mb-1"},
+                                                "text": "📌 搜索接管渠道说明",
+                                            },
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "text-body-2 mb-2"},
+                                                "text": "插件开启后，将全面无缝接管：1. Web网页端搜索流；2. 通知渠道交互搜索（Telegram / 微信机器人点播）；3. 新建订阅首次搜索加速（可选）。所有搜索均采用跨站点高并发与即出即洗流水线技术。",
+                                            },
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "text-subtitle-1 font-weight-bold mb-1"},
+                                                "text": "⚖️ 资源排序机制提示",
+                                            },
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "text-body-2 mb-2"},
+                                                "text": "搜索结果将严格按照【设定 -> 规则 -> 优先级规则组】进行原生匹配与分层定序，强烈建议先设置并校准好您的优先级规则组，以获得最符合心意的排序结果。",
+                                            },
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "text-caption text-medium-emphasis mt-2"},
+                                                "text": "📖 规则配置参考链接：暂未配置",
+                                            },
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
                     },
                 ],
             }
@@ -672,21 +816,125 @@ class FastIntersectSearch(_PluginBase):
         return form, default
 
     def get_page(self) -> Optional[List[dict]]:
-        """插件详情页展示。"""
+        """插件详情页展示：站点响应耗时统计大盘。"""
         if not self._enabled:
             return None
-        return [
+
+        # 读取站点耗时统计
+        site_stats = self._site_stats if hasattr(self, "_site_stats") and self._site_stats else (self.get_data("site_stats") or {})
+        now = time.time()
+        three_days_ago = now - 3 * 86400
+
+        # 构建表格行
+        table_rows = []
+        # 按站点名排序展示
+        for site_name, s_info in sorted(site_stats.items(), key=lambda x: x[0]):
+            last_cost = s_info.get("last_cost", 0.0)
+            last_time = s_info.get("last_time", 0)
+            history = s_info.get("history") or []
+
+            # 计算3天内平均耗时
+            valid_costs = [item.get("c", 0.0) for item in history if item.get("t", 0) >= three_days_ago and item.get("c") is not None]
+            if valid_costs:
+                avg_cost = round(sum(valid_costs) / len(valid_costs), 2)
+                sample_count = len(valid_costs)
+            else:
+                avg_cost = last_cost
+                sample_count = 1 if last_cost > 0 else 0
+
+            # 格式化上次时间
+            if last_time > 0:
+                elapsed = int(now - last_time)
+                if elapsed < 60:
+                    time_str = f"{elapsed} 秒前"
+                elif elapsed < 3600:
+                    time_str = f"{elapsed // 60} 分钟前"
+                elif elapsed < 86400:
+                    time_str = f"{elapsed // 3600} 小时前"
+                else:
+                    time_str = f"{elapsed // 86400} 天前"
+            else:
+                time_str = "暂无记录"
+
+            # 上次耗时样式
+            cost_class = "text-success font-weight-bold" if last_cost < 3.0 else ("text-warning font-weight-bold" if last_cost < 8.0 else "text-error font-weight-bold")
+            avg_class = "text-success" if avg_cost < 3.0 else ("text-warning" if avg_cost < 8.0 else "text-error")
+
+            table_rows.append({
+                "component": "tr",
+                "props": {"class": "text-sm"},
+                "content": [
+                    {"component": "td", "props": {"class": "font-weight-medium"}, "text": site_name},
+                    {"component": "td", "props": {"class": cost_class}, "text": f"{last_cost:.2f} s"},
+                    {"component": "td", "props": {"class": avg_class}, "text": f"{avg_cost:.2f} s ({sample_count}次采样)"},
+                    {"component": "td", "props": {"class": "text-medium-emphasis"}, "text": time_str},
+                ],
+            })
+
+        if not table_rows:
+            return [
+                {
+                    "component": "VRow",
+                    "content": [
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12},
+                            "content": [
+                                {
+                                    "component": "VAlert",
+                                    "props": {
+                                        "type": "info",
+                                        "variant": "tonal",
+                                        "text": "暂无站点响应耗时统计数据，发起一次搜索后将在此自动生成大盘。",
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+
+        header_row = {
+            "component": "thead",
+            "content": [
+                {"component": "th", "props": {"class": "text-start font-weight-bold"}, "text": "站点名称"},
+                {"component": "th", "props": {"class": "text-start font-weight-bold"}, "text": "上次响应时间"},
+                {"component": "th", "props": {"class": "text-start font-weight-bold"}, "text": "3天内平均响应时间"},
+                {"component": "th", "props": {"class": "text-start font-weight-bold"}, "text": "上次测速时间"},
+            ],
+        }
+
+        page = [
             {
-                "component": "VAlert",
-                "props": {
-                    "type": "success",
-                    "text": (
-                        "极速流式搜索插件已全局生效。单站即出即洗流水线、同站 3 秒频控防封、"
-                        "前置过滤前置、MetaInfo单次解析复用、排序完全交由系统原生模块标准化处理。"
-                    ),
-                },
+                "component": "VRow",
+                "content": [
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12},
+                        "content": [
+                            {
+                                "component": "VCard",
+                                "props": {"elevation": 1},
+                                "content": [
+                                    {
+                                        "component": "VTable",
+                                        "props": {"hover": True},
+                                        "content": [
+                                            header_row,
+                                            {
+                                                "component": "tbody",
+                                                "content": table_rows,
+                                            },
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
             }
         ]
+        return page
 
     def stop_service(self) -> None:
         """卸载钩子并停止服务。"""
@@ -731,14 +979,18 @@ class FastIntersectSearch(_PluginBase):
                     )
                     count = len(results) if results else 0
                     cost = round(time.time() - t_start, 2)
+                    self._record_site_cost(site_name=site_name, cost=cost, success=True)
                     logger.info(
                         f"站点 [{site_name}] 关键词 '{kw}' 搜索完成，耗时 {cost}s，返回种子 {count} 个"
                     )
                     if results:
                         await queue.put((site_name, results))
                 except asyncio.TimeoutError:
+                    self._record_site_cost(site_name=site_name, cost=float(self._search_timeout), success=False)
                     logger.warning(f"站点 [{site_name}] 检索 '{kw}' 超时 ({self._search_timeout}s)")
                 except Exception as exc:
+                    cost_err = round(time.time() - t_start, 2)
+                    self._record_site_cost(site_name=site_name, cost=cost_err, success=False)
                     logger.warning(f"站点 [{site_name}] 检索 '{kw}' 异常: {exc}")
         finally:
             # 无论异常与否，该站点生产结束，发送 None 标记
