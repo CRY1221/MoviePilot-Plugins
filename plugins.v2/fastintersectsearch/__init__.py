@@ -1,20 +1,18 @@
 """
 极速并发搜索插件 (FastIntersectSearch)
-1. 无缝接管系统网页前端搜索流 (SearchChain.search_page_events / async_search_by_id_stream / async_search_by_title_stream)；
-2. 跨站点并发检索，单站点内部多轮请求强制 3 秒安全频控防封；
-3. 内存直接调用系统 TorrentHelper.match_torrent 防抓错消歧；
-4. 内存直接调用系统 FilterChain 走底层 Rust 引擎完成规则优先组打分与体积/码率红线过滤；
-5. 自动识别 TMDB 完结状态，对整季全集包强力提权并排序；
-6. 独立日志系统，写入 plugins/fastintersectsearch.log，前端实时日志可直接查看。
+1. 全面接管系统网页前端搜索流 (SearchChain.search_page_events / async_search_by_id_stream / async_search_by_title_stream)；
+2. 跨站点异步并发检索，单站点多轮请求强制 3 秒安全频控防封；
+3. 流式流水线架构 (Streaming Pipeline)：单站即出即洗，前置过滤前置，密集计算全异步线程池化；
+4. MetaInfo 单次实例化与全链路零开销复用，消灭重复标题解析瓶颈；
+5. 系统 Rust 引擎纳秒级规则过滤 + 完结全集包智能提权排序；
+6. 独立日志写入 plugins/fastintersectsearch.log，支持实时诊断。
 """
 import asyncio
 import contextvars
 import re
 import time
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Type
-from urllib.parse import quote
+from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple, Type
 
-import httpx
 from app.agent.tools.base import MoviePilotTool, ToolTag
 from app.application.torrent.download import TorrentHelper
 from app.chain.media import MediaChain
@@ -22,7 +20,6 @@ from app.chain.search.facade import SearchChain
 from app.domain.context import Context, MediaInfo, TorrentInfo
 from app.domain.metainfo import MetaInfo
 from app.log import logger
-from app.runtime.config import settings
 from app.schemas.types import MediaSource, MediaType
 from app.sdk.plugin.base import _PluginBase
 
@@ -33,13 +30,13 @@ _in_fastsearch_context = contextvars.ContextVar("_in_fastsearch_context", defaul
 class FastIntersectSearchTool(MoviePilotTool):
     """
     极速并发搜索工具：跨站点并发检索，单站强制 3 秒安全频控；
-    内存直接调用系统模块完成识别防抓错与规则优先组过滤，自动对已完结影视全集包提权排序。
+    流式流水线架构：前置过滤前置，单次解析复用 MetaInfo，Rust 引擎秒级评级及完结全集包提权排序。
     """
 
     name: str = "fast_intersect_search"
     description: str = (
         "极速并发搜索工具：跨站点并发检索，单站点多轮请求强制等待 3 秒防刷；"
-        "内存直接调用系统 TorrentHelper 完成识别去噪与防抓错，"
+        "流式流水线即出即洗，前置过滤前置，内存直接调用系统 TorrentHelper 完成识别去噪与防抓错，"
         "并调用系统 FilterChain 走 Rust 引擎完成规则优先组筛选及已完结全集包提权排序。"
     )
     tags: List[ToolTag] = [ToolTag.Read, ToolTag.Resource]
@@ -83,25 +80,22 @@ class FastIntersectSearchTool(MoviePilotTool):
 
 class FastIntersectSearch(_PluginBase):
     """
-    极速搜索主插件：实现网页前端搜索接管与独立日志记录。
+    极速搜索主插件：实现网页前端搜索接管与流式流水线加速。
     """
 
     plugin_name: str = "极速交叉搜索"
     plugin_desc: str = (
-        "跨站并发+单站3秒频控防刷，全面接管网页前端搜索流，"
-        "内存识别去噪，Rust规则链秒级评级，完结全集包优先提权。"
+        "跨站并发+单站3秒频控，流式流水线即出即洗，"
+        "MetaInfo单次复用，Rust前置初筛与定级，完结全集包提权。"
     )
-    plugin_version: str = "1.1.0"
+    plugin_version: str = "1.3.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
     _instance: Optional["FastIntersectSearch"] = None
     _enabled: bool = True
-    _takeover_web_search: bool = True
-    _default_top_k: int = 30
-    _auto_prioritize_complete: bool = True
-    _search_timeout: int = 20
-    _use_system_rules: bool = True
+    _default_top_k: int = 0
+    _search_timeout: int = 15
     _site_sleep_seconds: float = 3.0
 
     # 原始 SearchChain 方法句柄备份
@@ -121,25 +115,22 @@ class FastIntersectSearch(_PluginBase):
         FastIntersectSearch._instance = self
         config = config or {}
         self._enabled = bool(config.get("enabled", True))
-        self._takeover_web_search = bool(config.get("takeover_web_search", True))
-        self._default_top_k = int(config.get("default_top_k", 30))
-        self._auto_prioritize_complete = bool(config.get("auto_prioritize_complete", True))
-        self._search_timeout = int(config.get("search_timeout", 20))
-        self._use_system_rules = bool(config.get("use_system_rules", True))
-        self._site_sleep_seconds = float(config.get("site_sleep_seconds", 3.0))
+        self._default_top_k = int(config.get("default_top_k", 0) or 0)
+        self._search_timeout = int(config.get("search_timeout", 15) or 15)
+        self._site_sleep_seconds = float(config.get("site_sleep_seconds", 3.0) or 3.0)
 
         # 备份并安装/卸载系统 SearchChain 钩子
         self._backup_original_methods()
-        if self._enabled and self._takeover_web_search:
+        if self._enabled:
             self._install_hooks()
-            logger.info("已成功接管 MoviePilot 系统 SearchChain 搜索流（网页端搜索全面生效极速并发）")
+            logger.info("已成功接管 MoviePilot 系统 SearchChain 搜索流（网页端搜索全面生效极速流式流水线）")
         else:
             self._uninstall_hooks()
             logger.info("已恢复 MoviePilot 原生搜索流")
 
         logger.info(
             f"极速搜索插件初始化完成: enabled={self._enabled}, "
-            f"接管网页端={self._takeover_web_search}, 单站间隔={self._site_sleep_seconds}s, "
+            f"单站间隔={self._site_sleep_seconds}s, "
             f"默认TopK={self._default_top_k}, 单站超时={self._search_timeout}s"
         )
 
@@ -269,7 +260,7 @@ class FastIntersectSearch(_PluginBase):
                     sites=sites,
                     mtype=mtype,
                     rule_groups=rule_groups,
-                    cache_local=bool(cache_local),
+                    cache_local=cache_local,
                 ):
                     yield event
             finally:
@@ -287,22 +278,20 @@ class FastIntersectSearch(_PluginBase):
             music_type: Optional[str] = None,
             include_candidates: bool = False,
         ) -> List[Context]:
-            """接管非流式精准媒体搜索。"""
-            if music_type or (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
-                return await plugin._orig_async_search_by_id(
-                    chain_self, media_source, media_id, mtype=mtype, area=area,
-                    season=season, sites=sites, cache_local=cache_local,
-                    music_type=music_type, include_candidates=include_candidates,
-                )
-            results = []
-            async for event in hooked_async_search_by_id_stream(
-                chain_self, media_source, media_id, mtype=mtype, area=area,
-                season=season, sites=sites, cache_local=cache_local,
-                music_type=music_type, include_candidates=include_candidates,
+            """接管非流式精准搜索并聚合成 Context 列表返回。"""
+            collector: List[Context] = []
+            async for _ in plugin.stream_search_by_media(
+                chain_instance=chain_self,
+                media_source=media_source,
+                media_id=media_id,
+                mtype=mtype,
+                season=season,
+                sites=sites,
+                cache_local=cache_local,
+                contexts_collector=collector,
             ):
-                if event.get("type") == "done":
-                    results = event.get("contexts") or []
-            return results
+                pass
+            return collector
 
         async def hooked_async_search_by_title(
             chain_self,
@@ -313,20 +302,19 @@ class FastIntersectSearch(_PluginBase):
             mtype: Optional[MediaType] = None,
             rule_groups: Optional[List[str]] = None,
         ) -> List[Context]:
-            """接管非流式模糊标题搜索。"""
-            if (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
-                return await plugin._orig_async_search_by_title(
-                    chain_self, title=title, page=page, sites=sites,
-                    cache_local=cache_local, mtype=mtype, rule_groups=rule_groups,
-                )
-            results = []
-            async for event in hooked_async_search_by_title_stream(
-                chain_self, title=title, page=page, sites=sites,
-                cache_local=cache_local, mtype=mtype, rule_groups=rule_groups,
+            """接管非流式标题搜索并聚合成 Context 列表返回。"""
+            collector: List[Context] = []
+            async for _ in plugin.stream_search_by_title(
+                chain_instance=chain_self,
+                title=title,
+                sites=sites,
+                mtype=mtype,
+                rule_groups=rule_groups,
+                cache_local=cache_local,
+                contexts_collector=collector,
             ):
-                if event.get("type") == "done":
-                    results = event.get("contexts") or []
-            return results
+                pass
+            return collector
 
         SearchChain.search_page_events = hooked_search_page_events
         SearchChain.async_search_by_id_stream = hooked_async_search_by_id_stream
@@ -376,28 +364,7 @@ class FastIntersectSearch(_PluginBase):
                         "component": "VSwitch",
                         "props": {
                             "model": "enabled",
-                            "label": "启用极速并发搜索插件",
-                        },
-                    },
-                    {
-                        "component": "VSwitch",
-                        "props": {
-                            "model": "takeover_web_search",
-                            "label": "全局接管网页端搜索（使网页前端搜索秒级响应）",
-                        },
-                    },
-                    {
-                        "component": "VSwitch",
-                        "props": {
-                            "model": "use_system_rules",
-                            "label": "应用 MoviePilot 系统过滤与优先级规则链 (Rust引擎)",
-                        },
-                    },
-                    {
-                        "component": "VSwitch",
-                        "props": {
-                            "model": "auto_prioritize_complete",
-                            "label": "影视完结时自动提权整季全集包 (Complete)",
+                            "label": "启用极速并发搜索插件（默认自动接管网页端搜索流并应用系统规则链）",
                         },
                     },
                     {
@@ -411,16 +378,16 @@ class FastIntersectSearch(_PluginBase):
                     {
                         "component": "VTextField",
                         "props": {
-                            "model": "default_top_k",
-                            "label": "搜索结果最大呈现数量 (默认 30)",
+                            "model": "search_timeout",
+                            "label": "站点单次搜索超时时间 (秒，建议 12~15)",
                             "type": "number",
                         },
                     },
                     {
                         "component": "VTextField",
                         "props": {
-                            "model": "search_timeout",
-                            "label": "站点单次搜索超时时间 (秒，默认 20)",
+                            "model": "default_top_k",
+                            "label": "搜索结果最大呈现数量 (填 0 不限制，全量展示)",
                             "type": "number",
                         },
                     },
@@ -429,12 +396,9 @@ class FastIntersectSearch(_PluginBase):
         ]
         default = {
             "enabled": True,
-            "takeover_web_search": True,
-            "use_system_rules": True,
-            "auto_prioritize_complete": True,
             "site_sleep_seconds": 3.0,
-            "default_top_k": 30,
-            "search_timeout": 20,
+            "search_timeout": 15,
+            "default_top_k": 0,
         }
         return form, default
 
@@ -448,8 +412,8 @@ class FastIntersectSearch(_PluginBase):
                 "props": {
                     "type": "success",
                     "text": (
-                        "极速搜索插件已全局生效。跨站点异步并发、同站 3 秒频控防封、"
-                        "已全面接管网页前端搜索流，支持系统 Rust 规则链秒级评级及完结全集包提权。"
+                        "极速流式搜索插件已全局生效。单站即出即洗流水线、同站 3 秒频控防封、"
+                        "前置过滤前置、MetaInfo单次解析复用、排序完全交由系统原生模块标准化处理。"
                     ),
                 },
             }
@@ -460,55 +424,232 @@ class FastIntersectSearch(_PluginBase):
         self._uninstall_hooks()
         logger.info("极速搜索插件后台服务已停止，系统搜索流已复原")
 
-    async def _search_site_worker(
+    async def _site_producer(
         self,
         chain_instance: SearchChain,
         site: dict,
         keywords: List[str],
-        mtype: Optional[MediaType] = None,
-    ) -> List[TorrentInfo]:
+        mtype: Optional[MediaType],
+        queue: asyncio.Queue,
+    ) -> None:
         """
-        单站点内部工作协程：
-        按关键词顺序检索，若触发多轮检索，强制等待 self._site_sleep_seconds 秒。
+        单站点独立生产者：
+        每搜出一个关键词的结果，立即推入队列，供消费端流水线无缝并行处理；
+        若有多轮关键词，同站安全睡眠指定秒数；完成后推入结束标记。
         """
         site_name = site.get("name") or str(site.get("id"))
-        site_torrents: List[TorrentInfo] = []
+        try:
+            for idx, kw in enumerate(keywords):
+                if not kw or not kw.strip():
+                    continue
+                if idx > 0 and self._site_sleep_seconds > 0:
+                    logger.info(
+                        f"站点 [{site_name}] 准备检索第 {idx + 1} 个关键词 '{kw}'，"
+                        f"安全等待 {self._site_sleep_seconds} 秒防刷频控..."
+                    )
+                    await asyncio.sleep(self._site_sleep_seconds)
 
-        for idx, kw in enumerate(keywords):
-            if not kw or not kw.strip():
-                continue
-            if idx > 0 and self._site_sleep_seconds > 0:
-                logger.info(
-                    f"站点 [{site_name}] 准备检索第 {idx + 1} 个关键词 '{kw}'，"
-                    f"安全等待 {self._site_sleep_seconds} 秒防刷频控..."
-                )
-                await asyncio.sleep(self._site_sleep_seconds)
+                t_start = time.time()
+                try:
+                    results = await asyncio.wait_for(
+                        chain_instance.async_search_site_torrents(
+                            site=site,
+                            keyword=kw.strip(),
+                            mtype=mtype,
+                            page=0,
+                        ),
+                        timeout=self._search_timeout,
+                    )
+                    count = len(results) if results else 0
+                    cost = round(time.time() - t_start, 2)
+                    logger.info(
+                        f"站点 [{site_name}] 关键词 '{kw}' 搜索完成，耗时 {cost}s，返回种子 {count} 个"
+                    )
+                    if results:
+                        await queue.put((site_name, results))
+                except asyncio.TimeoutError:
+                    logger.warning(f"站点 [{site_name}] 检索 '{kw}' 超时 ({self._search_timeout}s)")
+                except Exception as exc:
+                    logger.warning(f"站点 [{site_name}] 检索 '{kw}' 异常: {exc}")
+        finally:
+            # 无论异常与否，该站点生产结束，发送 None 标记
+            await queue.put((site_name, None))
 
-            t_start = time.time()
+    @staticmethod
+    def _pipeline_process_media_batch(
+        torrents: List[TorrentInfo],
+        seen_keys: Set[str],
+        mediainfo: MediaInfo,
+        sort_rulegroup: Optional[str],
+        chain_instance: SearchChain,
+    ) -> Tuple[List[Context], int]:
+        """
+        精准媒体搜索的单批次流式清洗管道（由 asyncio.to_thread 调度执行）：
+        1. 增量内存去重；
+        2. 系统 Rust 引擎前置硬过滤（白名单、排除3D、单层杜比阻断等）；
+        3. 内存识别消歧（仅对前置合格的种子执行，MetaInfo 仅单次实例化）；
+        4. 系统规则链定级（打上原生 pri_order）；
+        5. 装配 Context 并完全委托系统原生 TorrentHelper.sort_torrents 标准化排序。
+        """
+        raw_count = len(torrents)
+        unique_torrents: List[TorrentInfo] = []
+        for t in torrents:
+            key = t.enclosure if t.enclosure and not t.enclosure.startswith("[") else t.title
+            if key and key not in seen_keys:
+                seen_keys.add(key)
+                unique_torrents.append(t)
+
+        if not unique_torrents:
+            return [], raw_count
+
+        # 1. 系统 Rust 引擎前置硬过滤
+        pre_filtered = unique_torrents
+        try:
+            pre_res = chain_instance.filter_torrents(
+                rule_groups=["前置过滤"],
+                torrent_list=unique_torrents,
+                mediainfo=mediainfo,
+            )
+            if pre_res is not None:
+                pre_filtered = pre_res
+        except Exception as e:
+            logger.error(f"前置规则过滤异常: {e}")
+            pre_filtered = unique_torrents
+
+        if not pre_filtered:
+            return [], raw_count
+
+        # 2. 识别消歧（单次生成并复用 MetaInfo）
+        valid_items: List[Tuple[TorrentInfo, MetaInfo]] = []
+        for t in pre_filtered:
+            meta = MetaInfo(title=t.title, subtitle=t.description, mtype=mediainfo.type)
+            full_text = f"{t.title} {t.description}".lower()
+            is_valid = TorrentHelper.match_torrent(
+                mediainfo=mediainfo,
+                torrent_meta=meta,
+                torrent=t,
+            )
+            if not is_valid and mediainfo.title.lower() in full_text:
+                is_valid = True
+            if is_valid:
+                valid_items.append((t, meta))
+
+        if not valid_items:
+            return [], raw_count
+
+        # 3. 优先级排序定级（系统 Rust 引擎匹配并打上 pri_order）
+        valid_torrents = [item[0] for item in valid_items]
+        if sort_rulegroup:
             try:
-                # 设置超时，防止个别 PT 站卡死拖慢整个并发流水线
-                results = await asyncio.wait_for(
-                    chain_instance.async_search_site_torrents(
-                        site=site,
-                        keyword=kw.strip(),
-                        mtype=mtype,
-                        page=0,
-                    ),
-                    timeout=self._search_timeout,
-                )
-                count = len(results) if results else 0
-                cost = round(time.time() - t_start, 2)
-                logger.info(
-                    f"站点 [{site_name}] 关键词 '{kw}' 搜索完成，耗时 {cost}s，返回种子 {count} 个"
-                )
-                if results:
-                    site_torrents.extend(results)
-            except asyncio.TimeoutError:
-                logger.warning(f"站点 [{site_name}] 检索 '{kw}' 超时 ({self._search_timeout}s)")
-            except Exception as exc:
-                logger.warning(f"站点 [{site_name}] 检索 '{kw}' 异常: {exc}")
+                sorted_objs = chain_instance.filter_torrents(
+                    rule_groups=[sort_rulegroup],
+                    torrent_list=valid_torrents,
+                    mediainfo=mediainfo,
+                ) or []
+                matched_map = {id(obj): obj for obj in sorted_objs}
+                for t, _ in valid_items:
+                    if id(t) in matched_map:
+                        t.pri_order = getattr(matched_map[id(t)], "pri_order", 0) or 0
+                    else:
+                        t.pri_order = 0
+            except Exception as e:
+                logger.error(f"分类排序规则过滤异常: {e}")
 
-        return site_torrents
+        # 4. 装配 Context 并完全交由系统原生 TorrentHelper.sort_torrents 进行标准化排序
+        batch_contexts: List[Context] = []
+        for t, meta in valid_items:
+            ctx = Context(
+                torrent_info=t,
+                media_info=mediainfo,
+                meta_info=meta,
+            )
+            batch_contexts.append(ctx)
+
+        try:
+            sorted_batch = TorrentHelper.sort_torrents(batch_contexts)
+        except Exception as e:
+            logger.warning(f"调用系统 TorrentHelper.sort_torrents 异常，回退排序: {e}")
+            sorted_batch = sorted(
+                batch_contexts,
+                key=lambda x: (getattr(x.torrent_info, "pri_order", 0) or 0, getattr(x.torrent_info, "seeders", 0) or 0),
+                reverse=True,
+            )
+
+        return sorted_batch, raw_count
+        for t, meta, _ in valid_items:
+            ctx = Context(
+                torrent_info=t,
+                media_info=mediainfo,
+                meta_info=meta,
+            )
+            batch_contexts.append(ctx)
+
+        try:
+            sorted_batch = TorrentHelper.sort_torrents(batch_contexts)
+        except Exception as e:
+            logger.warning(f"调用系统 TorrentHelper.sort_torrents 异常，回退默认顺序: {e}")
+            sorted_batch = sorted(
+                batch_contexts,
+                key=lambda x: (getattr(x.torrent_info, "pri_order", 0) or 0, getattr(x.torrent_info, "seeders", 0) or 0),
+                reverse=True,
+            )
+
+        return sorted_batch, raw_count
+
+    @staticmethod
+    def _pipeline_process_title_batch(
+        torrents: List[TorrentInfo],
+        seen_keys: Set[str],
+        title: str,
+        mtype: Optional[MediaType],
+        rule_groups: Optional[List[str]],
+        chain_instance: SearchChain,
+    ) -> Tuple[List[Context], int]:
+        """
+        模糊标题搜索的单批次流式清洗管道（由 asyncio.to_thread 调度执行）：
+        1. 增量内存去重；
+        2. 系统 Rust 引擎前置硬过滤；
+        3. 单次生成 MetaInfo 并装配 Context，系统原生排序。
+        """
+        raw_count = len(torrents)
+        unique_torrents: List[TorrentInfo] = []
+        for t in torrents:
+            key = t.enclosure if t.enclosure and not t.enclosure.startswith("[") else t.title
+            if key and key not in seen_keys:
+                seen_keys.add(key)
+                unique_torrents.append(t)
+
+        if not unique_torrents:
+            return [], raw_count
+
+        active_rules = rule_groups if rule_groups else ["前置过滤"]
+        filtered_torrents = unique_torrents
+        try:
+            filtered_res = chain_instance.filter_torrents(
+                rule_groups=active_rules,
+                torrent_list=unique_torrents,
+                mediainfo=None,
+            )
+            if filtered_res is not None:
+                filtered_torrents = filtered_res
+        except Exception as e:
+            logger.error(f"标题搜索规则过滤异常: {e}")
+            filtered_torrents = unique_torrents
+
+        batch_contexts = [
+            Context(
+                torrent_info=t,
+                media_info=None,
+                meta_info=MetaInfo(title=t.title, subtitle=t.description, mtype=mtype),
+            )
+            for t in filtered_torrents
+        ]
+        try:
+            sorted_batch = TorrentHelper.sort_torrents(batch_contexts)
+        except Exception:
+            sorted_batch = batch_contexts
+
+        return sorted_batch, raw_count
 
     async def stream_search_by_media(
         self,
@@ -519,9 +660,11 @@ class FastIntersectSearch(_PluginBase):
         season: Optional[int] = None,
         sites: Optional[Any] = None,
         cache_local: bool = False,
+        contexts_collector: Optional[List[Context]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         接管网页端精准媒体搜索流 (GET /api/v1/search/media/{media_id}/stream)
+        流式流水线架构：即出即洗、即时推送、前置过滤前置、MetaInfo单次复用。
         """
         t0 = time.time()
         # 兼容 media_source 类型
@@ -587,6 +730,22 @@ class FastIntersectSearch(_PluginBase):
             }
             return
 
+        # 站点按媒体类型剪裁：非动漫影视自动避开纯动漫站点 (如 MiKan)
+        is_anime = False
+        if mediainfo.category in ["日番", "国漫", "动漫"] or (hasattr(mediainfo, "genre_ids") and 16 in (mediainfo.genre_ids or [])):
+            is_anime = True
+
+        filtered_indexer_sites = []
+        for s in indexer_sites:
+            s_name = (s.get("name") or "").lower()
+            if not is_anime and ("mikan" in s_name or "蜜柑" in s_name):
+                logger.info(f"跳过纯动漫站点 [{s.get('name')}] (当前为真人影视搜索)")
+                continue
+            filtered_indexer_sites.append(s)
+
+        if not filtered_indexer_sites:
+            filtered_indexer_sites = indexer_sites
+
         source_facts = [
             {
                 "source": str(s.get("id") or s.get("name")),
@@ -595,150 +754,95 @@ class FastIntersectSearch(_PluginBase):
                 "can_continue": False,
                 "error": None,
             }
-            for s in indexer_sites
+            for s in filtered_indexer_sites
         ]
 
         logger.info(
-            f"开始跨站点并发检索: 目标站点数={len(indexer_sites)}, "
+            f"启动流式并发流水线: 目标站点数={len(filtered_indexer_sites)}, "
             f"关键词={keywords}, 单站安全等待={self._site_sleep_seconds}s"
         )
 
-        # 3. 跨站点并发检索，实时流式推送初始 append 事件
-        raw_torrents: List[TorrentInfo] = []
-        contexts: List[Context] = []
-
-        async def worker_wrapper(site_item):
-            return await self._search_site_worker(
-                chain_instance=chain_instance,
-                site=site_item,
-                keywords=keywords,
-                mtype=mediainfo.type,
-            )
-
-        tasks = [asyncio.create_task(worker_wrapper(s)) for s in indexer_sites]
-
-        # 边完成边发布中间状态
-        for completed_task in asyncio.as_completed(tasks):
-            site_res = await completed_task
-            if site_res:
-                raw_torrents.extend(site_res)
-                # 构造临时 Context 供网页端展示即时进度
-                temp_contexts = [
-                    Context(
-                        torrent_info=t,
-                        media_info=mediainfo,
-                        meta_info=MetaInfo(title=t.title, subtitle=t.description),
-                    )
-                    for t in site_res
-                ]
-                yield {
-                    "type": "append",
-                    "stage": "searching",
-                    "items": [c.to_dict() for c in temp_contexts],
-                    "total_items": len(raw_torrents),
-                    "candidate_items": len(raw_torrents),
-                }
-
-        fetch_cost = round(time.time() - t0, 2)
-        logger.info(f"所有站点检索完毕，耗时 {fetch_cost}s，累计获取原始种子 {len(raw_torrents)} 个")
-
-        # 4. 内存去重
-        unique_map: Dict[str, TorrentInfo] = {}
-        for t in raw_torrents:
-            key = t.enclosure if t.enclosure and not t.enclosure.startswith("[") else t.title
-            if key and key not in unique_map:
-                unique_map[key] = t
-        unique_torrents = list(unique_map.values())
-
-        # 5. 内存调用系统 TorrentHelper.match_torrent 进行识别去噪比对
-        identified_torrents: List[Tuple[TorrentInfo, bool]] = []
-        for t in unique_torrents:
-            meta = MetaInfo(title=t.title, subtitle=t.description)
-            full_text = f"{t.title} {t.description}".lower()
-            is_complete = bool(
-                re.search(r"\b(complete|全集|全\d+集|全\d+期|s01\s*complete)\b", full_text, re.IGNORECASE)
-                or ("全" in full_text and "集" in full_text)
-                or ("完结" in (t.labels or []))
-            )
-            is_valid_work = TorrentHelper.match_torrent(
-                mediainfo=mediainfo,
-                torrent_meta=meta,
-                torrent=t,
-            )
-            if not is_valid_work and mediainfo.title.lower() in full_text:
-                is_valid_work = True
-            if is_valid_work:
-                identified_torrents.append((t, is_complete))
-
-        logger.info(
-            f"内存识别消歧完成: 唯一候选 {len(unique_torrents)} 个 -> "
-            f"识别吻合 {len(identified_torrents)} 个，剔除噪音 {len(unique_torrents) - len(identified_torrents)} 个"
-        )
-
-        # 6. 内存直接调用系统规则过滤链 (走系统 Rust 加速引擎)
-        rulegroup_to_apply = (
+        # 确定主排序规则组
+        sort_rulegroup = (
             mediainfo.category
             if mediainfo.category
             else ("国产剧" if mediainfo.type == MediaType.TV else "华语电影")
         )
-        valid_torrent_objs = [item[0] for item in identified_torrents]
 
-        t_filter = time.time()
-        filtered_objs: List[TorrentInfo] = []
-        if self._use_system_rules and valid_torrent_objs:
-            try:
-                filtered_objs = chain_instance.filter_torrents(
-                    rule_groups=[rulegroup_to_apply],
-                    torrent_list=valid_torrent_objs,
-                    mediainfo=mediainfo,
-                ) or []
-            except Exception as e:
-                logger.error(f"调用系统 Rust 规则过滤异常: {e}")
-                filtered_objs = valid_torrent_objs
-        else:
-            filtered_objs = valid_torrent_objs
+        # 3. 启动流水线队列与站点并发生产
+        queue: asyncio.Queue = asyncio.Queue()
+        producer_tasks = [
+            asyncio.create_task(
+                self._site_producer(
+                    chain_instance=chain_instance,
+                    site=s,
+                    keywords=keywords,
+                    mtype=mediainfo.type,
+                    queue=queue,
+                )
+            )
+            for s in filtered_indexer_sites
+        ]
 
-        filter_cost = round((time.time() - t_filter) * 1000, 2)
-        logger.info(
-            f"系统规则链 (Rust引擎) 过滤完成: 规则组='{rulegroup_to_apply}', "
-            f"入选 {len(filtered_objs)}/{len(valid_torrent_objs)}, 耗时 {filter_cost}ms"
-        )
+        seen_keys: Set[str] = set()
+        all_contexts: List[Context] = []
+        total_raw_count = 0
+        pending_sites = len(filtered_indexer_sites)
 
-        filtered_ids = {id(obj): obj for obj in filtered_objs}
-
-        # 7. 打分排序与完结提权
-        scored_contexts: List[Tuple[float, Context]] = []
-        for t_obj, is_complete in identified_torrents:
-            if id(t_obj) not in filtered_ids:
+        # 4. 边出边洗，即时流式消费产出
+        while pending_sites > 0:
+            site_name, batch_result = await queue.get()
+            if batch_result is None:
+                pending_sites -= 1
+                queue.task_done()
                 continue
 
-            matched_obj = filtered_ids[id(t_obj)]
-            pri_order = getattr(matched_obj, "pri_order", 100) or 100
-            t_obj.pri_order = pri_order
-
-            score = max(0, 100 - pri_order + 1) * 10
-            if is_complete:
-                if is_ended or self._auto_prioritize_complete:
-                    score += 300
-                else:
-                    score += 50
-            seeders = int(t_obj.seeders or 0)
-            score += min(seeders, 30)
-
-            ctx = Context(
-                torrent_info=t_obj,
-                media_info=mediainfo,
-                meta_info=MetaInfo(title=t_obj.title, subtitle=t_obj.description),
+            # 将密集 CPU 计算移交线程池，保障事件循环丝滑无阻
+            batch_contexts, raw_count = await asyncio.to_thread(
+                self._pipeline_process_media_batch,
+                torrents=batch_result,
+                seen_keys=seen_keys,
+                mediainfo=mediainfo,
+                sort_rulegroup=sort_rulegroup,
+                chain_instance=chain_instance,
             )
-            scored_contexts.append((score, ctx))
 
-        scored_contexts.sort(key=lambda x: x[0], reverse=True)
-        contexts = [item[1] for item in scored_contexts[:self._default_top_k]]
+            total_raw_count += raw_count
+            queue.task_done()
+
+            if batch_contexts:
+                all_contexts.extend(batch_contexts)
+                # 即时增量推送合规、已定级的高质量资源
+                yield {
+                    "type": "append",
+                    "stage": "searching",
+                    "items": [c.to_dict() for c in batch_contexts],
+                    "total_items": len(all_contexts),
+                    "candidate_items": total_raw_count,
+                }
+
+        # 等待所有生产者任务完全收尾
+        await asyncio.gather(*producer_tasks, return_exceptions=True)
+
+        # 5. 全局最终收敛排序：完全委托系统原生 TorrentHelper.sort_torrents
+        try:
+            sorted_all = TorrentHelper.sort_torrents(all_contexts)
+        except Exception as e:
+            logger.warning(f"调用系统 TorrentHelper.sort_torrents 异常，回退排序: {e}")
+            sorted_all = sorted(
+                all_contexts,
+                key=lambda x: (getattr(x.torrent_info, "pri_order", 0) or 0, getattr(x.torrent_info, "seeders", 0) or 0),
+                reverse=True,
+            )
+        contexts = sorted_all[:self._default_top_k] if self._default_top_k > 0 else sorted_all
 
         total_cost = round(time.time() - t0, 2)
-        logger.info(f"极速搜索全部收敛完成，总耗时 {total_cost}s，最终向前端交付高质量种子 {len(contexts)} 个")
+        logger.info(
+            f"极速流式搜索全部收敛完成: 总耗时 {total_cost}s, 原始候选 {total_raw_count} 个 -> "
+            f"最终高质量交付 {len(contexts)} 个"
+        )
 
-        # 8. 存入系统搜索缓存并记录上次搜索参数
+        # 6. 存入系统搜索缓存并记录上次搜索参数
         if cache_local:
             await chain_instance._async_save_results(contexts)
             chain_instance.save_last_search_params(
@@ -752,6 +856,9 @@ class FastIntersectSearch(_PluginBase):
                 result_type="torrent",
             )
 
+        if contexts_collector is not None:
+            contexts_collector.extend(contexts)
+
         yield {
             "type": "replace",
             "stage": "filtered",
@@ -759,18 +866,17 @@ class FastIntersectSearch(_PluginBase):
             "text": f"极速过滤完成，共 {len(contexts)} 个优质资源",
             "items": [c.to_dict() for c in contexts],
             "total_items": len(contexts),
-            "candidate_items": len(raw_torrents),
+            "candidate_items": total_raw_count,
             "sources": source_facts,
             "match_counts": {},
         }
         yield {
             "type": "done",
             "stage": "done",
-            "contexts": contexts,
             "text": f"极速搜索完成，共 {len(contexts)} 个资源 (总耗时 {total_cost}s)",
             "items": [c.to_dict() for c in contexts],
             "total_items": len(contexts),
-            "candidate_items": len(raw_torrents),
+            "candidate_items": total_raw_count,
             "sources": source_facts,
             "match_counts": {},
         }
@@ -783,9 +889,11 @@ class FastIntersectSearch(_PluginBase):
         mtype: Optional[MediaType] = None,
         rule_groups: Optional[List[str]] = None,
         cache_local: bool = False,
+        contexts_collector: Optional[List[Context]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         接管网页端模糊标题搜索流 (GET /api/v1/search/title/stream)
+        流式流水线架构：即出即洗、即时推送、前置过滤前置、MetaInfo单次复用。
         """
         t0 = time.time()
         logger.info(f"收到网页端标题搜索请求: keyword='{title}', mtype={mtype}, sites={sites}")
@@ -821,73 +929,62 @@ class FastIntersectSearch(_PluginBase):
             for s in indexer_sites
         ]
 
-        logger.info(f"开始标题跨站点并发检索: 站点数={len(indexer_sites)}, 关键词='{title}'")
+        logger.info(f"开始标题跨站点流式检索: 站点数={len(indexer_sites)}, 关键词='{title}'")
 
-        raw_torrents: List[TorrentInfo] = []
+        queue: asyncio.Queue = asyncio.Queue()
+        producer_tasks = [
+            asyncio.create_task(
+                self._site_producer(
+                    chain_instance=chain_instance,
+                    site=s,
+                    keywords=[title],
+                    mtype=mtype,
+                    queue=queue,
+                )
+            )
+            for s in indexer_sites
+        ]
 
-        async def worker_wrapper(site_item):
-            return await self._search_site_worker(
-                chain_instance=chain_instance,
-                site=site_item,
-                keywords=[title],
+        seen_keys: Set[str] = set()
+        all_contexts: List[Context] = []
+        total_raw_count = 0
+        pending_sites = len(indexer_sites)
+
+        while pending_sites > 0:
+            site_name, batch_result = await queue.get()
+            if batch_result is None:
+                pending_sites -= 1
+                queue.task_done()
+                continue
+
+            batch_contexts, raw_count = await asyncio.to_thread(
+                self._pipeline_process_title_batch,
+                torrents=batch_result,
+                seen_keys=seen_keys,
+                title=title,
                 mtype=mtype,
+                rule_groups=rule_groups,
+                chain_instance=chain_instance,
             )
 
-        tasks = [asyncio.create_task(worker_wrapper(s)) for s in indexer_sites]
+            total_raw_count += raw_count
+            queue.task_done()
 
-        for completed_task in asyncio.as_completed(tasks):
-            site_res = await completed_task
-            if site_res:
-                raw_torrents.extend(site_res)
-                temp_contexts = [
-                    Context(
-                        torrent_info=t,
-                        media_info=None,
-                        meta_info=MetaInfo(title=t.title, subtitle=t.description, mtype=mtype),
-                    )
-                    for t in site_res
-                ]
+            if batch_contexts:
+                all_contexts.extend(batch_contexts)
                 yield {
                     "type": "append",
                     "stage": "searching",
-                    "items": [c.to_dict() for c in temp_contexts],
-                    "total_items": len(raw_torrents),
-                    "candidate_items": len(raw_torrents),
+                    "items": [c.to_dict() for c in batch_contexts],
+                    "total_items": len(all_contexts),
+                    "candidate_items": total_raw_count,
                 }
 
-        # 内存去重
-        unique_map: Dict[str, TorrentInfo] = {}
-        for t in raw_torrents:
-            key = t.enclosure if t.enclosure and not t.enclosure.startswith("[") else t.title
-            if key and key not in unique_map:
-                unique_map[key] = t
-        unique_torrents = list(unique_map.values())
+        await asyncio.gather(*producer_tasks, return_exceptions=True)
 
-        # 规则链过滤
-        if self._use_system_rules and unique_torrents:
-            try:
-                filtered_torrents = chain_instance.filter_torrents(
-                    rule_groups=rule_groups or [],
-                    torrent_list=unique_torrents,
-                    mediainfo=None,
-                ) or []
-            except Exception as e:
-                logger.error(f"标题搜索规则过滤异常: {e}")
-                filtered_torrents = unique_torrents
-        else:
-            filtered_torrents = unique_torrents
-
-        contexts = [
-            Context(
-                torrent_info=t,
-                media_info=None,
-                meta_info=MetaInfo(title=t.title, subtitle=t.description, mtype=mtype),
-            )
-            for t in filtered_torrents[:self._default_top_k]
-        ]
-
+        contexts = all_contexts[:self._default_top_k] if self._default_top_k > 0 else all_contexts
         total_cost = round(time.time() - t0, 2)
-        logger.info(f"标题搜索完成，总耗时 {total_cost}s，交付资源 {len(contexts)} 个")
+        logger.info(f"标题流式搜索完成: 总耗时 {total_cost}s，交付资源 {len(contexts)} 个")
 
         if cache_local:
             await chain_instance._async_save_results(contexts)
@@ -899,6 +996,9 @@ class FastIntersectSearch(_PluginBase):
                 result_type="torrent",
             )
 
+        if contexts_collector is not None:
+            contexts_collector.extend(contexts)
+
         yield {
             "type": "replace",
             "stage": "filtered",
@@ -906,17 +1006,16 @@ class FastIntersectSearch(_PluginBase):
             "text": f"极速过滤完成，共 {len(contexts)} 个优质资源",
             "items": [c.to_dict() for c in contexts],
             "total_items": len(contexts),
-            "candidate_items": len(raw_torrents),
+            "candidate_items": total_raw_count,
             "sources": source_facts,
         }
         yield {
             "type": "done",
             "stage": "done",
-            "contexts": contexts,
             "text": f"搜索完成，共 {len(contexts)} 个资源 (总耗时 {total_cost}s)",
             "items": [c.to_dict() for c in contexts],
             "total_items": len(contexts),
-            "candidate_items": len(raw_torrents),
+            "candidate_items": total_raw_count,
             "sources": source_facts,
         }
 
@@ -933,7 +1032,6 @@ class FastIntersectSearch(_PluginBase):
         logger.info(f"智能体工具 fast_intersect_search 调用: title='{title}', en='{en_title}'")
         chain = SearchChain()
 
-        # 尝试查询 TMDB 媒体信息
         mediainfo = None
         try:
             from app.domain.meta.metabase import MetaBase
@@ -946,28 +1044,29 @@ class FastIntersectSearch(_PluginBase):
         if mediainfo:
             media_source = getattr(mediainfo, "media_source", MediaSource.TMDB) or MediaSource.TMDB
             media_id = str(getattr(mediainfo, "tmdb_id", None) or getattr(mediainfo, "media_id", ""))
-            async for evt in self.stream_search_by_media(
+            async for _ in self.stream_search_by_media(
                 chain_instance=chain,
                 media_source=media_source,
                 media_id=media_id,
                 mtype=mediainfo.type,
                 sites=site_ids,
                 cache_local=True,
+                contexts_collector=contexts,
             ):
-                if evt.get("type") == "done":
-                    contexts = evt.get("contexts") or []
+                pass
         else:
-            async for evt in self.stream_search_by_title(
+            async for _ in self.stream_search_by_title(
                 chain_instance=chain,
                 title=title,
                 sites=site_ids,
                 cache_local=True,
+                contexts_collector=contexts,
             ):
-                if evt.get("type") == "done":
-                    contexts = evt.get("contexts") or []
+                pass
 
+        target_contexts = contexts[:top_k] if top_k > 0 else contexts
         results = []
-        for c in contexts[:top_k]:
+        for c in target_contexts:
             t = c.torrent_info
             size_gb = round(float(t.size or 0) / (1024 ** 3), 2)
             results.append({
