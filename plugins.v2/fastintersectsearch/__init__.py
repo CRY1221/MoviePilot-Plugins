@@ -88,7 +88,7 @@ class FastIntersectSearch(_PluginBase):
         "跨站高并发+单站3秒频控，流式流水线即出即洗，"
         "接管Web搜索、通知渠道点播与新建订阅首搜，原生规则组排序。"
     )
-    plugin_version: str = "1.9.0"
+    plugin_version: str = "2.0.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
@@ -968,16 +968,16 @@ class FastIntersectSearch(_PluginBase):
 
             site_cell = {
                 "component": "td",
-                "props": {"style": "padding: 14px 20px; border-bottom: 1px solid #2d2d2d;"},
+                "props": {"style": "width: 28%; padding: 12px 16px; border-bottom: 1px solid #2d2d2d; vertical-align: middle;"},
                 "content": [
                     {
                         "component": "div",
-                        "props": {"style": "display: flex; align-items: center; gap: 14px;"},
+                        "props": {"style": "display: flex; align-items: center; gap: 12px;"},
                         "content": [
                             {
                                 "component": "VAvatar",
                                 "props": {
-                                    "size": 34,
+                                    "size": 30,
                                     "rounded": "sm",
                                     "style": "background-color: #252526; border: 1px solid #3c3c3c; flex-shrink: 0;",
                                 },
@@ -985,7 +985,7 @@ class FastIntersectSearch(_PluginBase):
                             },
                             {
                                 "component": "span",
-                                "props": {"style": "color: #ffffff; font-weight: 600; font-size: 15px; letter-spacing: 0.3px;"},
+                                "props": {"style": "color: #ffffff; font-weight: 600; font-size: 14px; letter-spacing: 0.3px;"},
                                 "text": site_name,
                             },
                         ],
@@ -993,7 +993,7 @@ class FastIntersectSearch(_PluginBase):
                 ],
             }
 
-            # 状态中文标签与上次耗时（大字号）
+            # 状态中文标签与上次耗时
             if last_cost < 2.0:
                 cost_color = "#4ec9b0"
                 tag_bg = "rgba(78, 201, 176, 0.16)"
@@ -1009,18 +1009,18 @@ class FastIntersectSearch(_PluginBase):
 
             last_cost_cell = {
                 "component": "td",
-                "props": {"style": "padding: 14px 20px; border-bottom: 1px solid #2d2d2d;"},
+                "props": {"style": "width: 24%; padding: 12px 16px; border-bottom: 1px solid #2d2d2d; vertical-align: middle;"},
                 "content": [
                     {
                         "component": "div",
-                        "props": {"style": "display: flex; align-items: center; gap: 10px;"},
+                        "props": {"style": "display: flex; align-items: center; gap: 8px;"},
                         "content": [
                             {
                                 "component": "span",
                                 "props": {
                                     "style": (
                                         f"background: {tag_bg}; color: {cost_color}; "
-                                        "font-size: 12px; font-weight: bold; padding: 3px 8px; "
+                                        "font-size: 11px; font-weight: bold; padding: 2px 6px; "
                                         "border-radius: 4px;"
                                     )
                                 },
@@ -1028,7 +1028,7 @@ class FastIntersectSearch(_PluginBase):
                             },
                             {
                                 "component": "span",
-                                "props": {"style": f"color: {cost_color}; font-weight: 700; font-size: 15px; font-family: monospace;"},
+                                "props": {"style": f"color: {cost_color}; font-weight: 700; font-size: 14px; font-family: monospace;"},
                                 "text": f"{last_cost:.2f} 秒",
                             },
                         ],
@@ -1039,16 +1039,16 @@ class FastIntersectSearch(_PluginBase):
             avg_color = "#4ec9b0" if avg_cost < 3.0 else ("#dcdcaa" if avg_cost < 7.0 else "#f44747")
             avg_cost_cell = {
                 "component": "td",
-                "props": {"style": "padding: 14px 20px; border-bottom: 1px solid #2d2d2d;"},
+                "props": {"style": "width: 28%; padding: 12px 16px; border-bottom: 1px solid #2d2d2d; vertical-align: middle;"},
                 "content": [
                     {
                         "component": "span",
-                        "props": {"style": f"color: {avg_color}; font-weight: 600; font-size: 15px; font-family: monospace;"},
+                        "props": {"style": f"color: {avg_color}; font-weight: 600; font-size: 14px; font-family: monospace;"},
                         "text": f"{avg_cost:.2f} 秒 ",
                     },
                     {
                         "component": "span",
-                        "props": {"style": "color: #858585; font-size: 13px; margin-left: 6px;"},
+                        "props": {"style": "color: #858585; font-size: 12px; margin-left: 4px;"},
                         "text": f"({sample_count} 次采样)",
                     },
                 ],
@@ -1056,7 +1056,7 @@ class FastIntersectSearch(_PluginBase):
 
             time_cell = {
                 "component": "td",
-                "props": {"style": "padding: 14px 20px; border-bottom: 1px solid #2d2d2d; color: #a0a0a0; font-size: 14px;"},
+                "props": {"style": "width: 20%; padding: 12px 16px; border-bottom: 1px solid #2d2d2d; color: #a0a0a0; font-size: 13px; vertical-align: middle;"},
                 "text": time_str,
             }
 
@@ -1080,7 +1080,7 @@ class FastIntersectSearch(_PluginBase):
                                     "props": {
                                         "style": (
                                             "background-color: #1e1e1e; border: 1px solid #2d2d2d; "
-                                            "border-radius: 8px; padding: 32px; text-align: center; color: #a0a0a0; font-size: 15px;"
+                                            "border-radius: 8px; padding: 28px; text-align: center; color: #a0a0a0; font-size: 14px;"
                                         )
                                     },
                                     "text": "📊 暂无站点响应耗时统计数据，发起一次搜索后将在此自动生成测速大盘。",
@@ -1091,26 +1091,20 @@ class FastIntersectSearch(_PluginBase):
                 }
             ]
 
-        # 顶部三项核心指标（全面中文化、大字号大图标）
+        # 顶部三项核心指标（紧凑缩小、颜色统一高级蓝 #569cd6、去掉注释）
         overall_avg = round(sum_avg / max(1, total_sites), 2)
         stat_cards = [
             {
-                "label": "已纳管站点总数",
+                "label": "站点总数",
                 "val": f"{total_sites} 个",
-                "color": "#569cd6",
-                "desc": "支持跨站点毫秒级并发检索",
             },
             {
                 "label": "秒级响应站点 ( < 3秒 )",
                 "val": f"{fast_sites} / {total_sites}",
-                "color": "#4ec9b0",
-                "desc": "即出即洗流水线极速交付",
             },
             {
                 "label": "全站平均响应时间",
                 "val": f"{overall_avg} 秒",
-                "color": "#dcdcaa",
-                "desc": "3天内并发平响健康基线",
             },
         ]
 
@@ -1125,39 +1119,34 @@ class FastIntersectSearch(_PluginBase):
                         "props": {
                             "style": (
                                 "background-color: #1e1e1e; border: 1px solid #2d2d2d; "
-                                f"border-top: 4px solid {c['color']}; "
-                                "border-radius: 8px; padding: 18px 22px; box-shadow: 0 4px 16px rgba(0,0,0,0.35);"
+                                "border-left: 3px solid #569cd6; "
+                                "border-radius: 6px; padding: 12px 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.25);"
                             )
                         },
                         "content": [
                             {
                                 "component": "div",
-                                "props": {"style": "color: #9cdcfe; font-size: 14px; font-weight: 600; letter-spacing: 0.5px;"},
+                                "props": {"style": "color: #858585; font-size: 12px; font-weight: 500; letter-spacing: 0.3px;"},
                                 "text": c["label"],
                             },
                             {
                                 "component": "div",
-                                "props": {"style": f"color: {c['color']}; font-size: 30px; font-weight: 800; font-family: monospace; margin: 6px 0;"},
+                                "props": {"style": "color: #569cd6; font-size: 22px; font-weight: 700; font-family: monospace; margin-top: 4px;"},
                                 "text": c["val"],
-                            },
-                            {
-                                "component": "div",
-                                "props": {"style": "color: #7f8c8d; font-size: 13px;"},
-                                "text": c["desc"],
                             },
                         ],
                     }
                 ],
             })
 
-        header_th_style = "padding: 14px 20px; color: #9cdcfe; font-weight: bold; font-size: 14px; border-bottom: 2px solid #333333;"
+        th_base = "padding: 12px 16px; color: #9cdcfe; font-weight: 600; font-size: 13px; border-bottom: 2px solid #333333; text-align: left; vertical-align: middle;"
         header_row = {
             "component": "thead",
             "content": [
-                {"component": "th", "props": {"style": header_th_style}, "text": "站点名称 (按拼音排序)"},
-                {"component": "th", "props": {"style": header_th_style}, "text": "上次响应时间"},
-                {"component": "th", "props": {"style": header_th_style}, "text": "3天内平均响应时间"},
-                {"component": "th", "props": {"style": header_th_style}, "text": "最近测速时间"},
+                {"component": "th", "props": {"style": f"width: 28%; {th_base}"}, "text": "站点名称 (按拼音排序)"},
+                {"component": "th", "props": {"style": f"width: 24%; {th_base}"}, "text": "上次响应时间"},
+                {"component": "th", "props": {"style": f"width: 28%; {th_base}"}, "text": "3天内平均响应时间"},
+                {"component": "th", "props": {"style": f"width: 20%; {th_base}"}, "text": "最近测速时间"},
             ],
         }
 
@@ -1165,7 +1154,7 @@ class FastIntersectSearch(_PluginBase):
             # 顶部统计卡片
             {
                 "component": "VRow",
-                "props": {"class": "mb-4"},
+                "props": {"class": "mb-3"},
                 "content": card_cols,
             },
             # 下方主看板表格
@@ -1181,7 +1170,7 @@ class FastIntersectSearch(_PluginBase):
                                 "props": {
                                     "style": (
                                         "background-color: #1e1e1e; border: 1px solid #2d2d2d; "
-                                        "border-radius: 8px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.4);"
+                                        "border-radius: 8px; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.35);"
                                     )
                                 },
                                 "content": [
@@ -1189,7 +1178,7 @@ class FastIntersectSearch(_PluginBase):
                                         "component": "div",
                                         "props": {
                                             "style": (
-                                                "background-color: #252526; padding: 14px 20px; "
+                                                "background-color: #252526; padding: 12px 16px; "
                                                 "display: flex; align-items: center; justify-content: space-between; "
                                                 "border-bottom: 1px solid #333333;"
                                             )
@@ -1197,15 +1186,15 @@ class FastIntersectSearch(_PluginBase):
                                         "content": [
                                             {
                                                 "component": "div",
-                                                "props": {"style": "display: flex; align-items: center; gap: 10px;"},
+                                                "props": {"style": "display: flex; align-items: center; gap: 8px;"},
                                                 "content": [
-                                                    {"component": "span", "props": {"style": "display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: #4ec9b0;"}},
-                                                    {"component": "span", "props": {"style": "color: #ffffff; font-size: 15px; font-weight: bold;"}, "text": "站点并发响应测速大盘"},
+                                                    {"component": "span", "props": {"style": "display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #4ec9b0;"}},
+                                                    {"component": "span", "props": {"style": "color: #ffffff; font-size: 14px; font-weight: bold;"}, "text": "搜索耗时总览"},
                                                 ],
                                             },
                                             {
                                                 "component": "span",
-                                                "props": {"style": "color: #6a9955; font-size: 13px; font-weight: 500;"},
+                                                "props": {"style": "color: #6a9955; font-size: 12px; font-weight: 500;"},
                                                 "text": "每次搜索自动刷新 · 3天滑动采样",
                                             },
                                         ],
@@ -1214,7 +1203,7 @@ class FastIntersectSearch(_PluginBase):
                                         "component": "VTable",
                                         "props": {
                                             "hover": True,
-                                            "style": "background-color: #1e1e1e; width: 100%;",
+                                            "style": "background-color: #1e1e1e; width: 100%; border-collapse: collapse;",
                                         },
                                         "content": [
                                             header_row,
