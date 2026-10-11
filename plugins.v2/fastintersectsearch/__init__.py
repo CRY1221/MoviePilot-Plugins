@@ -27,6 +27,22 @@ from app.sdk.plugin.base import _PluginBase
 _in_fastsearch_context = contextvars.ContextVar("_in_fastsearch_context", default=False)
 
 
+def _safe_reset_context_token(token: Optional[contextvars.Token]) -> None:
+    """
+    安全重置 ContextVar，彻底免疫跨 asyncio.Task / 异步生成器边界导致的 ValueError。
+    """
+    if token is not None:
+        try:
+            _in_fastsearch_context.reset(token)
+            return
+        except (ValueError, LookupError):
+            pass
+    try:
+        _in_fastsearch_context.set(False)
+    except Exception:
+        pass
+
+
 class FastIntersectSearchTool(MoviePilotTool):
     """
     极速并发搜索工具：跨站点并发检索，单站强制 3 秒安全频控；
@@ -88,7 +104,7 @@ class FastIntersectSearch(_PluginBase):
         "跨站高并发+单站3秒频控，流式流水线即出即洗，"
         "接管Web搜索、通知渠道点播与新建订阅首搜，原生规则组排序。"
     )
-    plugin_version: str = "2.4.0"
+    plugin_version: str = "2.5.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
@@ -217,7 +233,7 @@ class FastIntersectSearch(_PluginBase):
                     async for evt in plugin._orig_search_page_events(chain_self, params=params):
                         yield evt
             finally:
-                _in_fastsearch_context.reset(token)
+                _safe_reset_context_token(token)
 
         async def hooked_async_search_by_id_stream(
             chain_self,
@@ -254,7 +270,7 @@ class FastIntersectSearch(_PluginBase):
                 ):
                     yield event
             finally:
-                _in_fastsearch_context.reset(token)
+                _safe_reset_context_token(token)
 
         async def hooked_async_search_by_title_stream(
             chain_self,
@@ -286,7 +302,7 @@ class FastIntersectSearch(_PluginBase):
                 ):
                     yield event
             finally:
-                _in_fastsearch_context.reset(token)
+                _safe_reset_context_token(token)
 
         async def hooked_async_search_by_id(
             chain_self,
@@ -402,7 +418,7 @@ class FastIntersectSearch(_PluginBase):
                     collector = candidate_filter(collector)
                 return collector
             finally:
-                _in_fastsearch_context.reset(token)
+                _safe_reset_context_token(token)
 
         def hooked_process(
             chain_self,
@@ -1140,15 +1156,16 @@ class FastIntersectSearch(_PluginBase):
                 ],
             })
 
-        # 表头四列，精致微光表头，强制居中对齐
-        header_th_style = "width: 25%; text-align: center; vertical-align: middle; padding: 14px 12px; color: #94a3b8; font-weight: 600; font-size: 13px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); letter-spacing: 0.5px;"
+        # 表头四列：第一列「站点名称」左对齐并精确与下方文字位置对齐（padding-left: 68px），其余三列居中
+        th_site_style = "width: 25%; text-align: left; vertical-align: middle; padding: 14px 12px 14px 68px; color: #94a3b8; font-weight: 600; font-size: 13px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); letter-spacing: 0.5px;"
+        th_center_style = "width: 25%; text-align: center; vertical-align: middle; padding: 14px 12px; color: #94a3b8; font-weight: 600; font-size: 13px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); letter-spacing: 0.5px;"
         header_row = {
             "component": "thead",
             "content": [
-                {"component": "th", "props": {"style": header_th_style}, "text": "站点名称"},
-                {"component": "th", "props": {"style": header_th_style}, "text": "上次响应时间"},
-                {"component": "th", "props": {"style": header_th_style}, "text": "3天内平均响应时间"},
-                {"component": "th", "props": {"style": header_th_style}, "text": "最近测速时间"},
+                {"component": "th", "props": {"style": th_site_style}, "text": "站点名称"},
+                {"component": "th", "props": {"style": th_center_style}, "text": "上次响应时间"},
+                {"component": "th", "props": {"style": th_center_style}, "text": "3天内平均响应时间"},
+                {"component": "th", "props": {"style": th_center_style}, "text": "最近测速时间"},
             ],
         }
 
