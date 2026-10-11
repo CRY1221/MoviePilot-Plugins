@@ -124,7 +124,7 @@ class FastIntersectSearch(_PluginBase):
         "跨站高并发+单站3秒频控，流式流水线即出即洗，"
         "接管Web搜索、通知渠道点播与新建订阅首搜，原生规则组排序。"
     )
-    plugin_version: str = "2.7.2"
+    plugin_version: str = "2.7.1"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
