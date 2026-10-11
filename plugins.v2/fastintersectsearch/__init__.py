@@ -124,7 +124,7 @@ class FastIntersectSearch(_PluginBase):
         "跨站高并发+单站3秒频控，流式流水线即出即洗，"
         "接管Web搜索、通知渠道点播与新建订阅首搜，原生规则组排序。"
     )
-    plugin_version: str = "2.7.1"
+    plugin_version: str = "2.7.2"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
@@ -183,25 +183,28 @@ class FastIntersectSearch(_PluginBase):
 
     def _backup_original_methods(self) -> None:
         """备份系统原生搜索方法。"""
+        # 必须用 staticmethod 包装：裸函数存入类属性后，通过插件实例访问会被绑定为方法，
+        # 自动多传一个 self，导致放行原生搜索时参数错位
+        # （TypeError: got multiple values for argument 'media_source'/'mtype'/'title'）。
         if FastIntersectSearch._orig_search_page_events is None:
-            FastIntersectSearch._orig_search_page_events = SearchChain.search_page_events
+            FastIntersectSearch._orig_search_page_events = staticmethod(SearchChain.search_page_events)
         if FastIntersectSearch._orig_async_search_by_id_stream is None:
-            FastIntersectSearch._orig_async_search_by_id_stream = SearchChain.async_search_by_id_stream
+            FastIntersectSearch._orig_async_search_by_id_stream = staticmethod(SearchChain.async_search_by_id_stream)
         if FastIntersectSearch._orig_async_search_by_title_stream is None:
-            FastIntersectSearch._orig_async_search_by_title_stream = SearchChain.async_search_by_title_stream
+            FastIntersectSearch._orig_async_search_by_title_stream = staticmethod(SearchChain.async_search_by_title_stream)
         if FastIntersectSearch._orig_async_search_by_id is None:
-            FastIntersectSearch._orig_async_search_by_id = SearchChain.async_search_by_id
+            FastIntersectSearch._orig_async_search_by_id = staticmethod(SearchChain.async_search_by_id)
         if FastIntersectSearch._orig_async_search_by_title is None:
-            FastIntersectSearch._orig_async_search_by_title = SearchChain.async_search_by_title
+            FastIntersectSearch._orig_async_search_by_title = staticmethod(SearchChain.async_search_by_title)
         if FastIntersectSearch._orig_process is None:
-            FastIntersectSearch._orig_process = SearchChain.process
+            FastIntersectSearch._orig_process = staticmethod(SearchChain.process)
         if FastIntersectSearch._orig_async_process is None:
-            FastIntersectSearch._orig_async_process = SearchChain.async_process
+            FastIntersectSearch._orig_async_process = staticmethod(SearchChain.async_process)
 
         try:
             from app.chain.search.scan import SearchScan
             if FastIntersectSearch._orig_scan_run is None:
-                FastIntersectSearch._orig_scan_run = SearchScan.run
+                FastIntersectSearch._orig_scan_run = staticmethod(SearchScan.run)
         except Exception as e:
             logger.warning(f"备份 SearchScan.run 异常: {e}")
 
