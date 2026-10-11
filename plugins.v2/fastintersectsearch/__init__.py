@@ -17,7 +17,9 @@ from app.agent.tools.base import MoviePilotTool, ToolTag
 from app.application.torrent.download import TorrentHelper
 from app.chain.media import MediaChain
 from app.chain.search.facade import SearchChain
-from app.domain.context import Context, MediaInfo, TorrentInfo
+from app.domain.context import Context, MediaInfo, MusicInfo, TorrentInfo
+from app.domain.media import is_music_media_source
+from app.domain.meta.metamusic import MetaMusic
 from app.domain.metainfo import MetaInfo
 from app.log import logger
 from app.schemas.types import MediaSource, MediaType
@@ -25,6 +27,39 @@ from app.sdk.plugin.base import _PluginBase
 
 # 用于追踪防止递归调用的上下文标记
 _in_fastsearch_context = contextvars.ContextVar("_in_fastsearch_context", default=False)
+
+
+def _is_music_search_request(
+    mtype: Optional[Any] = None,
+    media_source: Optional[Any] = None,
+    music_type: Optional[str] = None,
+    mediainfo: Optional[Any] = None,
+) -> bool:
+    """
+    严密检测当前请求是否为音乐搜索请求。
+    如果是音乐搜索，极速搜索必须 100% 完整放行，原路交给系统原生音乐搜索与匹配链路。
+    """
+    if music_type:
+        return True
+    if mtype:
+        mtype_str = getattr(mtype, "value", str(mtype)).lower()
+        if mtype_str in ("music", "音乐") or mtype == MediaType.MUSIC:
+            return True
+    if media_source and is_music_media_source(media_source):
+        return True
+    if mediainfo:
+        if isinstance(mediainfo, (MusicInfo, MetaMusic)):
+            return True
+        info_type = getattr(mediainfo, "type", None)
+        if info_type:
+            info_type_str = getattr(info_type, "value", str(info_type)).lower()
+            if info_type_str in ("music", "音乐") or info_type == MediaType.MUSIC:
+                return True
+        if getattr(mediainfo, "music_type", None):
+            return True
+        if is_music_media_source(getattr(mediainfo, "media_source", None)):
+            return True
+    return False
 
 
 def _safe_reset_context_token(token: Optional[contextvars.Token]) -> None:
@@ -104,7 +139,7 @@ class FastIntersectSearch(_PluginBase):
         "跨站高并发+单站3秒频控，流式流水线即出即洗，"
         "接管Web搜索、通知渠道点播与新建订阅首搜，原生规则组排序。"
     )
-    plugin_version: str = "2.5.0"
+    plugin_version: str = "2.6.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
@@ -196,14 +231,15 @@ class FastIntersectSearch(_PluginBase):
         ) -> AsyncIterator[dict[str, Any]]:
             """接管 Web 前端手动分页单页搜索 (manual_paging=True)。"""
             mtype = params.get("mtype")
-            if (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
+            media_source = params.get("media_source")
+            music_type = params.get("music_type")
+            if _is_music_search_request(mtype=mtype, media_source=media_source, music_type=music_type) or _in_fastsearch_context.get():
                 async for evt in plugin._orig_search_page_events(chain_self, params=params):
                     yield evt
                 return
 
             token = _in_fastsearch_context.set(True)
             try:
-                media_source = params.get("media_source")
                 media_id = params.get("media_id")
                 season = params.get("season")
                 sites = params.get("sites")
@@ -248,7 +284,7 @@ class FastIntersectSearch(_PluginBase):
             include_candidates: bool = False,
         ) -> AsyncIterator[dict]:
             """接管流式精准媒体搜索。"""
-            if music_type or (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
+            if _is_music_search_request(mtype=mtype, media_source=media_source, music_type=music_type) or _in_fastsearch_context.get():
                 async for evt in plugin._orig_async_search_by_id_stream(
                     chain_self, media_source, media_id, mtype=mtype, area=area,
                     season=season, sites=sites, cache_local=cache_local,
@@ -282,7 +318,7 @@ class FastIntersectSearch(_PluginBase):
             rule_groups: Optional[List[str]] = None,
         ) -> AsyncIterator[dict]:
             """接管流式模糊标题搜索。"""
-            if (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
+            if _is_music_search_request(mtype=mtype) or _in_fastsearch_context.get():
                 async for evt in plugin._orig_async_search_by_title_stream(
                     chain_self, title=title, page=page, sites=sites,
                     cache_local=cache_local, mtype=mtype, rule_groups=rule_groups,
@@ -317,6 +353,20 @@ class FastIntersectSearch(_PluginBase):
             include_candidates: bool = False,
         ) -> List[Context]:
             """接管非流式精准搜索并聚合成 Context 列表返回。"""
+            if _is_music_search_request(mtype=mtype, media_source=media_source, music_type=music_type) or _in_fastsearch_context.get():
+                return await plugin._orig_async_search_by_id(
+                    chain_self,
+                    media_source=media_source,
+                    media_id=media_id,
+                    mtype=mtype,
+                    area=area,
+                    season=season,
+                    sites=sites,
+                    cache_local=cache_local,
+                    music_type=music_type,
+                    include_candidates=include_candidates,
+                )
+
             collector: List[Context] = []
             async for _ in plugin.stream_search_by_media(
                 chain_instance=chain_self,
@@ -341,6 +391,17 @@ class FastIntersectSearch(_PluginBase):
             rule_groups: Optional[List[str]] = None,
         ) -> List[Context]:
             """接管非流式标题搜索并聚合成 Context 列表返回。"""
+            if _is_music_search_request(mtype=mtype) or _in_fastsearch_context.get():
+                return await plugin._orig_async_search_by_title(
+                    chain_self,
+                    title=title,
+                    page=page,
+                    sites=sites,
+                    cache_local=cache_local,
+                    mtype=mtype,
+                    rule_groups=rule_groups,
+                )
+
             collector: List[Context] = []
             async for _ in plugin.stream_search_by_title(
                 chain_instance=chain_self,
@@ -370,8 +431,7 @@ class FastIntersectSearch(_PluginBase):
             """
             接管系统异步 process 入口。
             """
-            mtype = getattr(mediainfo, "type", None)
-            if (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
+            if _is_music_search_request(mediainfo=mediainfo) or _in_fastsearch_context.get():
                 return await plugin._orig_async_process(
                     chain_self,
                     mediainfo=mediainfo,
@@ -396,7 +456,7 @@ class FastIntersectSearch(_PluginBase):
                         chain_instance=chain_self,
                         media_source=media_source,
                         media_id=media_id,
-                        mtype=mtype,
+                        mtype=getattr(mediainfo, "type", None),
                         sites=sites,
                         cache_local=True,
                         contexts_collector=collector,
@@ -408,7 +468,7 @@ class FastIntersectSearch(_PluginBase):
                         chain_instance=chain_self,
                         title=str(search_kw),
                         sites=sites,
-                        mtype=mtype,
+                        mtype=getattr(mediainfo, "type", None),
                         rule_groups=rule_groups,
                         cache_local=True,
                         contexts_collector=collector,
@@ -436,8 +496,7 @@ class FastIntersectSearch(_PluginBase):
             """
             接管系统同步 process 入口（通知渠道点播核心入口：Telegram/微信）。
             """
-            mtype = getattr(mediainfo, "type", None)
-            if (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
+            if _is_music_search_request(mediainfo=mediainfo) or _in_fastsearch_context.get():
                 return plugin._orig_process(
                     chain_self,
                     mediainfo=mediainfo,
@@ -452,7 +511,7 @@ class FastIntersectSearch(_PluginBase):
                     candidate_filter=candidate_filter,
                 )
 
-            logger.info("极速搜索接管通知渠道交互搜索: %s (%s)", getattr(mediainfo, "title", keyword), mtype)
+            logger.info("极速搜索接管通知渠道交互搜索: %s (%s)", getattr(mediainfo, "title", keyword), getattr(mediainfo, "type", None))
             coro = hooked_async_process(
                 chain_self=chain_self,
                 mediainfo=mediainfo,
@@ -505,8 +564,8 @@ class FastIntersectSearch(_PluginBase):
                 execution = getattr(scan_self, "execution", None)
                 plan = getattr(scan_self, "plan", None)
                 media = getattr(scan_self, "media", None)
-                # 检查执行上下文或媒体信息
-                if not plan or not media:
+                # 检查执行上下文或媒体信息，若为音乐实体则完全放行原生链路
+                if not plan or not media or _is_music_search_request(mediainfo=media):
                     return plugin._orig_scan_run(scan_self, submit)
 
                 # 识别当前订阅是否为新建订阅 (state == 'N')
