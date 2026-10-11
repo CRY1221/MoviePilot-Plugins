@@ -88,18 +88,19 @@ class FastIntersectSearch(_PluginBase):
         "跨站并发+单站3秒频控，流式流水线即出即洗，"
         "MetaInfo单次复用，Rust前置初筛与定级，完结全集包提权。"
     )
-    plugin_version: str = "1.5.0"
+    plugin_version: str = "1.6.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
     _instance: Optional["FastIntersectSearch"] = None
     _enabled: bool = True
     _bilingual_search: bool = True
+    _accelerate_new_subscribe: bool = True
     _default_top_k: int = 0
     _search_timeout: int = 15
     _site_sleep_seconds: float = 3.0
 
-    # 原始 SearchChain 方法句柄备份
+    # 原始 SearchChain / SearchScan 方法句柄备份
     _orig_search_page_events = None
     _orig_async_search_by_id_stream = None
     _orig_async_search_by_title_stream = None
@@ -107,6 +108,7 @@ class FastIntersectSearch(_PluginBase):
     _orig_async_search_by_title = None
     _orig_process = None
     _orig_async_process = None
+    _orig_scan_run = None
 
     @classmethod
     def get_instance(cls) -> Optional["FastIntersectSearch"]:
@@ -119,6 +121,7 @@ class FastIntersectSearch(_PluginBase):
         config = config or {}
         self._enabled = bool(config.get("enabled", True))
         self._bilingual_search = bool(config.get("bilingual_search", True))
+        self._accelerate_new_subscribe = bool(config.get("accelerate_new_subscribe", True))
         self._default_top_k = int(config.get("default_top_k", 0) or 0)
         self._search_timeout = int(config.get("search_timeout", 15) or 15)
         self._site_sleep_seconds = float(config.get("site_sleep_seconds", 3.0) or 3.0)
@@ -135,6 +138,7 @@ class FastIntersectSearch(_PluginBase):
         logger.info(
             f"极速搜索插件初始化完成: enabled={self._enabled}, "
             f"双语搜索={self._bilingual_search}, "
+            f"新建订阅加速={self._accelerate_new_subscribe}, "
             f"单站间隔={self._site_sleep_seconds}s, "
             f"默认TopK={self._default_top_k}, 单站超时={self._search_timeout}s"
         )
@@ -155,6 +159,13 @@ class FastIntersectSearch(_PluginBase):
             FastIntersectSearch._orig_process = SearchChain.process
         if FastIntersectSearch._orig_async_process is None:
             FastIntersectSearch._orig_async_process = SearchChain.async_process
+
+        try:
+            from app.chain.search.scan import SearchScan
+            if FastIntersectSearch._orig_scan_run is None:
+                FastIntersectSearch._orig_scan_run = SearchScan.run
+        except Exception as e:
+            logger.warning(f"备份 SearchScan.run 异常: {e}")
 
     def _install_hooks(self) -> None:
         """将系统 SearchChain 的搜索接口替换为极速搜索插件的接管方法。"""
@@ -461,6 +472,99 @@ class FastIntersectSearch(_PluginBase):
         SearchChain.process = hooked_process
         SearchChain.async_process = hooked_async_process
 
+        try:
+            from app.chain.search.scan import SearchScan
+
+            def hooked_scan_run(scan_self, submit: Callable[[List[Context], Set[str]], Set[str]]) -> None:
+                """
+                接管新建订阅首次搜索：
+                利用极速并发流式流水线预先抓取洗净并排序的优质种子，
+                安全注入给原生 submit 闭包以完成订阅决策与状态推进。
+                """
+                if not plugin._enabled or not plugin._accelerate_new_subscribe:
+                    return plugin._orig_scan_run(scan_self, submit)
+
+                execution = getattr(scan_self, "execution", None)
+                plan = getattr(scan_self, "plan", None)
+                media = getattr(scan_self, "media", None)
+                # 检查执行上下文或媒体信息
+                if not plan or not media:
+                    return plugin._orig_scan_run(scan_self, submit)
+
+                # 识别当前订阅是否为新建订阅 (state == 'N')
+                is_new_subscribe = False
+                try:
+                    from app.chain.subscribe.facade import SubscribeChain
+                    sub_repo = getattr(SubscribeChain(), "subscription_repository", None)
+                    if execution and getattr(execution, "task_id", None) and sub_repo:
+                        # 查找关联订阅
+                        for sub_item in sub_repo.list() or []:
+                            if getattr(sub_item, "state", None) == "N":
+                                if (sub_item.tmdbid and str(sub_item.tmdbid) == str(media.tmdb_id)) or (sub_item.name == media.title):
+                                    is_new_subscribe = True
+                                    break
+                    elif sub_repo:
+                        # 兜底：如果库内该媒体处于 N 状态
+                        for sub_item in sub_repo.list() or []:
+                            if getattr(sub_item, "state", None) == "N" and (
+                                (sub_item.tmdbid and str(sub_item.tmdbid) == str(media.tmdb_id)) or (sub_item.name == media.title)
+                            ):
+                                is_new_subscribe = True
+                                break
+                except Exception as ex:
+                    logger.debug(f"检查订阅状态异常: {ex}")
+
+                if not is_new_subscribe:
+                    # 非新建订阅（日常巡检追更），100% 原路放行原生 scan.run
+                    return plugin._orig_scan_run(scan_self, submit)
+
+                logger.info(f"⚡ 极速搜索接管新建订阅首次搜索加速: 《{media.title}》")
+                try:
+                    # 使用当前线程或独立线程运行极速流式预取
+                    collector: List[Context] = []
+                    coro = plugin._async_prefetch_subscription_contexts(
+                        chain_instance=scan_self.owner,
+                        mediainfo=media,
+                        sites=list(scan_self.sources.sites.keys()) if hasattr(scan_self, "sources") else None,
+                        rule_groups=plan.rule_groups,
+                    )
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None
+
+                    if loop and loop.is_running():
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                            collector = pool.submit(asyncio.run, coro).result()
+                    else:
+                        collector = asyncio.run(coro)
+
+                    if collector:
+                        logger.info(f"⚡ 首次订阅极速预取交付 {len(collector)} 个优质种子，直接喂给原生结算闭包")
+                        ready_targets = scan_self.collection.targets
+                        settled = submit(collector, ready_targets)
+                        if settled:
+                            logger.info(f"⚡ 原生结算闭包已成功采纳并下载目标: {settled}")
+                            scan_self.submitted.update(settled)
+                            scan_self.collection.settle(settled)
+                            scan_self.checkpoint()
+
+                    # 如果目标已全部结算完毕（例如电影下载成功，或全集包下载成功），优雅收官
+                    if not scan_self.collection.remaining:
+                        logger.info(f"⚡ 首次订阅目标已由极速搜索全量达成，提前收官，无需后续翻页: {media.title}")
+                        scan_self._finish_round()
+                        return
+                except Exception as e:
+                    logger.error(f"首次订阅加速注入异常，平滑回退原生扫描: {e}", exc_info=True)
+
+                # 若仍有残余目标（如未完结散集未完全下满），回退放行原生 scan.run 继续深度搜集
+                return plugin._orig_scan_run(scan_self, submit)
+
+            SearchScan.run = hooked_scan_run
+        except Exception as e:
+            logger.warning(f"装配 SearchScan.run Hook 异常: {e}")
+
     def _uninstall_hooks(self) -> None:
         """恢复系统原生搜索方法。"""
         if FastIntersectSearch._orig_search_page_events is not None:
@@ -477,6 +581,12 @@ class FastIntersectSearch(_PluginBase):
             SearchChain.process = FastIntersectSearch._orig_process
         if FastIntersectSearch._orig_async_process is not None:
             SearchChain.async_process = FastIntersectSearch._orig_async_process
+        if FastIntersectSearch._orig_scan_run is not None:
+            try:
+                from app.chain.search.scan import SearchScan
+                SearchScan.run = FastIntersectSearch._orig_scan_run
+            except Exception:
+                pass
 
     def get_state(self) -> bool:
         """获取启用状态。"""
@@ -508,6 +618,13 @@ class FastIntersectSearch(_PluginBase):
                         "props": {
                             "model": "enabled",
                             "label": "启用极速并发搜索插件（默认自动接管网页端搜索流与通知渠道点播）",
+                        },
+                    },
+                    {
+                        "component": "VSwitch",
+                        "props": {
+                            "model": "accelerate_new_subscribe",
+                            "label": "新建订阅首次搜索加速（仅在新建订阅执行首次检索时注入秒级并发，完成后无缝切回原生）",
                         },
                     },
                     {
@@ -546,6 +663,7 @@ class FastIntersectSearch(_PluginBase):
         ]
         default = {
             "enabled": True,
+            "accelerate_new_subscribe": True,
             "bilingual_search": True,
             "site_sleep_seconds": 3.0,
             "search_timeout": 15,
@@ -782,6 +900,47 @@ class FastIntersectSearch(_PluginBase):
             sorted_batch = batch_contexts
 
         return sorted_batch, raw_count
+
+    async def _async_prefetch_subscription_contexts(
+        self,
+        chain_instance: SearchChain,
+        mediainfo: MediaInfo,
+        sites: Optional[List[int]] = None,
+        rule_groups: Optional[List[str]] = None,
+    ) -> List[Context]:
+        """
+        专门为新建订阅首搜提供的极速并发预取：
+        跨站点并发 + 前置过滤 + 识别消歧 + 原生排序，毫秒级交付。
+        """
+        collector: List[Context] = []
+        media_source = getattr(mediainfo, "media_source", MediaSource.TMDB) or MediaSource.TMDB
+        media_id = str(getattr(mediainfo, "tmdb_id", None) or getattr(mediainfo, "media_id", "") or "")
+        mtype = getattr(mediainfo, "type", None)
+
+        if media_id:
+            async for _ in self.stream_search_by_media(
+                chain_instance=chain_instance,
+                media_source=media_source,
+                media_id=media_id,
+                mtype=mtype,
+                sites=sites,
+                cache_local=True,
+                contexts_collector=collector,
+            ):
+                pass
+        else:
+            async for _ in self.stream_search_by_title(
+                chain_instance=chain_instance,
+                title=getattr(mediainfo, "title", ""),
+                sites=sites,
+                mtype=mtype,
+                rule_groups=rule_groups,
+                cache_local=True,
+                contexts_collector=collector,
+            ):
+                pass
+
+        return collector
 
     async def stream_search_by_media(
         self,
