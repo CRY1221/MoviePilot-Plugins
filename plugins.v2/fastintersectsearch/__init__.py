@@ -17,7 +17,9 @@ from app.agent.tools.base import MoviePilotTool, ToolTag
 from app.application.torrent.download import TorrentHelper
 from app.chain.media import MediaChain
 from app.chain.search.facade import SearchChain
-from app.domain.context import Context, MediaInfo, TorrentInfo
+from app.domain.context import Context, MediaInfo, MusicInfo, TorrentInfo
+from app.domain.media import is_music_media_source
+from app.domain.meta.metamusic import MetaMusic
 from app.domain.metainfo import MetaInfo
 from app.log import logger
 from app.schemas.types import MediaSource, MediaType
@@ -27,24 +29,37 @@ from app.sdk.plugin.base import _PluginBase
 _in_fastsearch_context = contextvars.ContextVar("_in_fastsearch_context", default=False)
 
 
-def _is_movie_or_tv(mtype: Optional[Any]) -> bool:
-    """白名单判定：是否为电影或电视剧（支持枚举、字符串或中文）。"""
-    if not mtype:
-        return False
-    if mtype in (MediaType.MOVIE, MediaType.TV):
+def _is_music_search_request(
+    mtype: Optional[Any] = None,
+    media_source: Optional[Any] = None,
+    music_type: Optional[str] = None,
+    mediainfo: Optional[Any] = None,
+) -> bool:
+    """
+    严密检测当前请求是否为音乐搜索请求。
+    如果是音乐搜索，极速搜索必须 100% 完整放行，原路交给系统原生音乐搜索与匹配链路。
+    """
+    if music_type:
         return True
-    val = getattr(mtype, "value", str(mtype)).lower()
-    return val in ("movie", "tv", "电影", "电视剧")
-
-
-def _is_non_video_type(mtype: Optional[Any]) -> bool:
-    """是否为明确的非影视类型（如音乐、人物、合集等）。"""
-    if not mtype:
-        return False
-    val = getattr(mtype, "value", str(mtype)).lower()
-    return val not in ("movie", "tv", "电影", "电视剧", "unknown", "none", "")
-    val = getattr(mtype, "value", str(mtype)).lower()
-    return val not in ("movie", "tv", "电影", "电视剧", "unknown", "none", "")
+    if mtype:
+        mtype_str = getattr(mtype, "value", str(mtype)).lower()
+        if mtype_str in ("music", "音乐") or mtype == MediaType.MUSIC:
+            return True
+    if media_source and is_music_media_source(media_source):
+        return True
+    if mediainfo:
+        if isinstance(mediainfo, (MusicInfo, MetaMusic)):
+            return True
+        info_type = getattr(mediainfo, "type", None)
+        if info_type:
+            info_type_str = getattr(info_type, "value", str(info_type)).lower()
+            if info_type_str in ("music", "音乐") or info_type == MediaType.MUSIC:
+                return True
+        if getattr(mediainfo, "music_type", None):
+            return True
+        if is_music_media_source(getattr(mediainfo, "media_source", None)):
+            return True
+    return False
 
 
 def _safe_reset_context_token(token: Optional[contextvars.Token]) -> None:
@@ -124,7 +139,7 @@ class FastIntersectSearch(_PluginBase):
         "跨站高并发+单站3秒频控，流式流水线即出即洗，"
         "接管Web搜索、通知渠道点播与新建订阅首搜，原生规则组排序。"
     )
-    plugin_version: str = "2.7.1"
+    plugin_version: str = "2.6.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
@@ -183,28 +198,25 @@ class FastIntersectSearch(_PluginBase):
 
     def _backup_original_methods(self) -> None:
         """备份系统原生搜索方法。"""
-        # 必须用 staticmethod 包装：裸函数存入类属性后，通过插件实例访问会被绑定为方法，
-        # 自动多传一个 self，导致放行原生搜索时参数错位
-        # （TypeError: got multiple values for argument 'media_source'/'mtype'/'title'）。
         if FastIntersectSearch._orig_search_page_events is None:
-            FastIntersectSearch._orig_search_page_events = staticmethod(SearchChain.search_page_events)
+            FastIntersectSearch._orig_search_page_events = SearchChain.search_page_events
         if FastIntersectSearch._orig_async_search_by_id_stream is None:
-            FastIntersectSearch._orig_async_search_by_id_stream = staticmethod(SearchChain.async_search_by_id_stream)
+            FastIntersectSearch._orig_async_search_by_id_stream = SearchChain.async_search_by_id_stream
         if FastIntersectSearch._orig_async_search_by_title_stream is None:
-            FastIntersectSearch._orig_async_search_by_title_stream = staticmethod(SearchChain.async_search_by_title_stream)
+            FastIntersectSearch._orig_async_search_by_title_stream = SearchChain.async_search_by_title_stream
         if FastIntersectSearch._orig_async_search_by_id is None:
-            FastIntersectSearch._orig_async_search_by_id = staticmethod(SearchChain.async_search_by_id)
+            FastIntersectSearch._orig_async_search_by_id = SearchChain.async_search_by_id
         if FastIntersectSearch._orig_async_search_by_title is None:
-            FastIntersectSearch._orig_async_search_by_title = staticmethod(SearchChain.async_search_by_title)
+            FastIntersectSearch._orig_async_search_by_title = SearchChain.async_search_by_title
         if FastIntersectSearch._orig_process is None:
-            FastIntersectSearch._orig_process = staticmethod(SearchChain.process)
+            FastIntersectSearch._orig_process = SearchChain.process
         if FastIntersectSearch._orig_async_process is None:
-            FastIntersectSearch._orig_async_process = staticmethod(SearchChain.async_process)
+            FastIntersectSearch._orig_async_process = SearchChain.async_process
 
         try:
             from app.chain.search.scan import SearchScan
             if FastIntersectSearch._orig_scan_run is None:
-                FastIntersectSearch._orig_scan_run = staticmethod(SearchScan.run)
+                FastIntersectSearch._orig_scan_run = SearchScan.run
         except Exception as e:
             logger.warning(f"备份 SearchScan.run 异常: {e}")
 
@@ -220,8 +232,8 @@ class FastIntersectSearch(_PluginBase):
             """接管 Web 前端手动分页单页搜索 (manual_paging=True)。"""
             mtype = params.get("mtype")
             media_source = params.get("media_source")
-            # 白名单：仅接管电影/电视剧或非明确其它类型的搜索，其余（音乐/人物/合集等）全部放行
-            if _is_non_video_type(mtype) or _in_fastsearch_context.get():
+            music_type = params.get("music_type")
+            if _is_music_search_request(mtype=mtype, media_source=media_source, music_type=music_type) or _in_fastsearch_context.get():
                 async for evt in plugin._orig_search_page_events(chain_self, params=params):
                     yield evt
                 return
@@ -272,8 +284,7 @@ class FastIntersectSearch(_PluginBase):
             include_candidates: bool = False,
         ) -> AsyncIterator[dict]:
             """接管流式精准媒体搜索。"""
-            # 白名单：非电影/电视剧一律放行原生
-            if not _is_movie_or_tv(mtype) or music_type or _in_fastsearch_context.get():
+            if _is_music_search_request(mtype=mtype, media_source=media_source, music_type=music_type) or _in_fastsearch_context.get():
                 async for evt in plugin._orig_async_search_by_id_stream(
                     chain_self, media_source, media_id, mtype=mtype, area=area,
                     season=season, sites=sites, cache_local=cache_local,
@@ -307,8 +318,7 @@ class FastIntersectSearch(_PluginBase):
             rule_groups: Optional[List[str]] = None,
         ) -> AsyncIterator[dict]:
             """接管流式模糊标题搜索。"""
-            # 明确为非影视类型时放行
-            if _is_non_video_type(mtype) or _in_fastsearch_context.get():
+            if _is_music_search_request(mtype=mtype) or _in_fastsearch_context.get():
                 async for evt in plugin._orig_async_search_by_title_stream(
                     chain_self, title=title, page=page, sites=sites,
                     cache_local=cache_local, mtype=mtype, rule_groups=rule_groups,
@@ -343,8 +353,7 @@ class FastIntersectSearch(_PluginBase):
             include_candidates: bool = False,
         ) -> List[Context]:
             """接管非流式精准搜索并聚合成 Context 列表返回。"""
-            # 白名单：非电影/电视剧一律放行原生
-            if not _is_movie_or_tv(mtype) or music_type or _in_fastsearch_context.get():
+            if _is_music_search_request(mtype=mtype, media_source=media_source, music_type=music_type) or _in_fastsearch_context.get():
                 return await plugin._orig_async_search_by_id(
                     chain_self,
                     media_source=media_source,
@@ -382,8 +391,7 @@ class FastIntersectSearch(_PluginBase):
             rule_groups: Optional[List[str]] = None,
         ) -> List[Context]:
             """接管非流式标题搜索并聚合成 Context 列表返回。"""
-            # 明确为非影视类型时放行
-            if _is_non_video_type(mtype) or _in_fastsearch_context.get():
+            if _is_music_search_request(mtype=mtype) or _in_fastsearch_context.get():
                 return await plugin._orig_async_search_by_title(
                     chain_self,
                     title=title,
@@ -423,8 +431,7 @@ class FastIntersectSearch(_PluginBase):
             """
             接管系统异步 process 入口。
             """
-            # 白名单：严格仅接管电影和电视剧
-            if not _is_movie_or_tv(getattr(mediainfo, "type", None)) or _in_fastsearch_context.get():
+            if _is_music_search_request(mediainfo=mediainfo) or _in_fastsearch_context.get():
                 return await plugin._orig_async_process(
                     chain_self,
                     mediainfo=mediainfo,
@@ -489,8 +496,7 @@ class FastIntersectSearch(_PluginBase):
             """
             接管系统同步 process 入口（通知渠道点播核心入口：Telegram/微信）。
             """
-            # 白名单：严格仅接管电影和电视剧
-            if not _is_movie_or_tv(getattr(mediainfo, "type", None)) or _in_fastsearch_context.get():
+            if _is_music_search_request(mediainfo=mediainfo) or _in_fastsearch_context.get():
                 return plugin._orig_process(
                     chain_self,
                     mediainfo=mediainfo,
@@ -558,8 +564,8 @@ class FastIntersectSearch(_PluginBase):
                 execution = getattr(scan_self, "execution", None)
                 plan = getattr(scan_self, "plan", None)
                 media = getattr(scan_self, "media", None)
-                # 白名单：仅接管电影和电视剧的新建订阅，其余类型（音乐等）100% 原路放行
-                if not plan or not media or not _is_movie_or_tv(getattr(media, "type", None)):
+                # 检查执行上下文或媒体信息，若为音乐实体则完全放行原生链路
+                if not plan or not media or _is_music_search_request(mediainfo=media):
                     return plugin._orig_scan_run(scan_self, submit)
 
                 # 识别当前订阅是否为新建订阅 (state == 'N')
@@ -1624,13 +1630,11 @@ class FastIntersectSearch(_PluginBase):
             f"分类={mediainfo.category}, 完结={is_ended}"
         )
 
-        # 整理中英搜索关键词（原名缺失或与主标题相同（如中文原名）时回退英文译名，避免双语退化）
+        # 整理中英搜索关键词
         keywords = [mediainfo.title]
         if self._bilingual_search:
-            en_title = getattr(mediainfo, "original_title", None)
-            if not en_title or not en_title.strip() or en_title.strip().lower() == mediainfo.title.strip().lower():
-                en_title = getattr(mediainfo, "en_title", None)
-            if en_title and en_title.strip() and en_title.strip().lower() != mediainfo.title.strip().lower():
+            en_title = getattr(mediainfo, "original_title", None) or getattr(mediainfo, "en_title", None)
+            if en_title and en_title.strip() and en_title.strip().lower() != mediainfo.title.lower():
                 keywords.append(en_title.strip())
 
         # 2. 获取有效站点列表
@@ -1649,12 +1653,9 @@ class FastIntersectSearch(_PluginBase):
             return
 
         # 站点按媒体类型剪裁：非动漫影视自动避开纯动漫站点 (如 MiKan)
-        # 判定覆盖库分类（含“动画电影”等动画类目）与 TMDB 动画类型 (genre_id=16)，修复豆瓣源识别缺少 genre_ids 时的误跳过
-        category_str = str(mediainfo.category or "")
-        is_anime = (
-            any(key in category_str for key in ("动画", "动漫", "日番", "国漫"))
-            or (hasattr(mediainfo, "genre_ids") and 16 in (mediainfo.genre_ids or []))
-        )
+        is_anime = False
+        if mediainfo.category in ["日番", "国漫", "动漫"] or (hasattr(mediainfo, "genre_ids") and 16 in (mediainfo.genre_ids or [])):
+            is_anime = True
 
         filtered_indexer_sites = []
         for s in indexer_sites:
@@ -1850,16 +1851,16 @@ class FastIntersectSearch(_PluginBase):
             for s in indexer_sites
         ]
 
-        # 整理标题搜索关键词（识别媒体补充英文关键词；识别失败不阻塞主搜索）
+        # 整理标题搜索关键词
         keywords = [title]
         if self._bilingual_search:
             try:
-                rec_media = await MediaChain().async_recognize_media(meta=MetaInfo(title=title))
+                from app.chain.media import MediaChain
+                from app.domain.meta.metabase import MetaBase
+                rec_media = await MediaChain().async_recognize_media(meta=MetaBase(title=title))
                 if rec_media:
-                    en_t = getattr(rec_media, "original_title", None)
-                    if not en_t or not en_t.strip() or en_t.strip().lower() == title.strip().lower():
-                        en_t = getattr(rec_media, "en_title", None)
-                    if en_t and en_t.strip() and en_t.strip().lower() != title.strip().lower():
+                    en_t = getattr(rec_media, "original_title", None) or getattr(rec_media, "en_title", None)
+                    if en_t and en_t.strip() and en_t.strip().lower() != title.lower():
                         keywords.append(en_t.strip())
             except Exception:
                 pass
@@ -1917,19 +1918,7 @@ class FastIntersectSearch(_PluginBase):
 
         await asyncio.gather(*producer_tasks, return_exceptions=True)
 
-        # 全局最终收敛排序：完全委托系统原生 TorrentHelper.sort_torrents（与精准搜索路径保持一致）
-        try:
-            sorted_all = TorrentHelper.sort_torrents(all_contexts)
-        except Exception as e:
-            logger.warning(f"调用系统 TorrentHelper.sort_torrents 异常，回退排序: {e}")
-            sorted_all = sorted(
-                all_contexts,
-                key=lambda x: (getattr(x.torrent_info, "pri_order", 0) or 0, getattr(x.torrent_info, "seeders", 0) or 0),
-                reverse=True,
-            )
-        logger.info(f"标题搜索全局收敛排序完成: {len(sorted_all)} 条资源已统一排序")
-
-        contexts = sorted_all[:self._default_top_k] if self._default_top_k > 0 else sorted_all
+        contexts = all_contexts[:self._default_top_k] if self._default_top_k > 0 else all_contexts
         total_cost = round(time.time() - t0, 2)
         logger.info(f"标题流式搜索完成: 总耗时 {total_cost}s，交付资源 {len(contexts)} 个")
 
@@ -1981,16 +1970,10 @@ class FastIntersectSearch(_PluginBase):
 
         mediainfo = None
         try:
-            meta_obj = MetaInfo(title=title)
-            logger.info(
-                f"智能体工具识别开始: title={title!r}, meta.name={getattr(meta_obj, 'name', None)!r}, meta.type={getattr(meta_obj, 'type', None)}"
-            )
+            from app.domain.meta.metabase import MetaBase
+            meta_obj = MetaBase(title=title)
             mediainfo = await MediaChain().async_recognize_media(meta=meta_obj)
-            logger.info(
-                f"智能体工具识别结果: {'命中 《' + mediainfo.title + '》' if mediainfo else '未命中'}"
-            )
-        except Exception as e:
-            logger.warning(f"智能体工具识别异常，回退标题搜索: {e}", exc_info=True)
+        except Exception:
             mediainfo = None
 
         contexts: List[Context] = []
