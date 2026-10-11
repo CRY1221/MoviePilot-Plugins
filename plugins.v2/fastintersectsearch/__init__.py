@@ -118,7 +118,7 @@ class FastIntersectSearch(_PluginBase):
     def get_command() -> List[Dict[str, Any]]:
         return []
 
-    def get_api() -> List[Dict[str, Any]]:
+    def get_api(self) -> List[Dict[str, Any]]:
         return []
 
     def get_agent_tools(self) -> List[Type[MoviePilotTool]]:
