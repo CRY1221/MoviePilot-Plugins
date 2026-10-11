@@ -88,7 +88,7 @@ class FastIntersectSearch(_PluginBase):
         "跨站高并发+单站3秒频控，流式流水线即出即洗，"
         "接管Web搜索、通知渠道点播与新建订阅首搜，原生规则组排序。"
     )
-    plugin_version: str = "2.0.0"
+    plugin_version: str = "2.1.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
@@ -815,66 +815,6 @@ class FastIntersectSearch(_PluginBase):
         }
         return form, default
 
-    @staticmethod
-    def _pinyin_sort_key(name: str) -> str:
-        """
-        根据中文拼音首字母/拼音名称生成排序键（A-Z）。
-        内置主流PT站点全量拼音表，未知字降级为GBK区段或原生字符。
-        """
-        pinyin_dict = {
-            "铂金家": "bojin",
-            "北洋": "beiyang",
-            "瓷": "ci",
-            "春天": "chuntian",
-            "岛": "dao",
-            "蝶粉": "diefen",
-            "杜比": "dubi",
-            "红豆饭": "hongdoufan",
-            "海胆": "haidan",
-            "开普勒": "kaipule",
-            "聆音": "lingyin",
-            "馒头": "mantou",
-            "猫": "mao",
-            "南洋": "nanyang",
-            "葡萄": "putao",
-            "麒麟": "qilin",
-            "天空": "tiankong",
-            "悟空": "wukong",
-            "影": "ying",
-            "猪猪": "zhuzhu",
-        }
-        for k, v in pinyin_dict.items():
-            if name.startswith(k):
-                return v + name[len(k):].lower()
-
-        # GBK 一级汉字拼音区段兜底
-        res = []
-        table = [
-            (0xB0A1, "a"), (0xB0C5, "b"), (0xB2C1, "c"), (0xB4EE, "d"),
-            (0xB6EA, "e"), (0xB7A2, "f"), (0xB8C1, "g"), (0xB9FE, "h"),
-            (0xBBF7, "j"), (0xBFA6, "k"), (0xC0AC, "l"), (0xC2E8, "m"),
-            (0xC4C3, "n"), (0xC5B6, "o"), (0xC5BE, "p"), (0xC6DA, "q"),
-            (0xC8BB, "r"), (0xC8F6, "s"), (0xCBFA, "t"), (0xCDDA, "w"),
-            (0xCEF4, "x"), (0xD1B9, "y"), (0xD4D1, "z"), (0xD7FA, "z"),
-        ]
-        for ch in name:
-            try:
-                gbk_bytes = ch.encode("gbk")
-                if len(gbk_bytes) == 2:
-                    val = gbk_bytes[0] * 256 + gbk_bytes[1]
-                    py = None
-                    for i in range(len(table) - 1):
-                        if table[i][0] <= val < table[i + 1][0]:
-                            py = table[i][1]
-                            break
-                    if py:
-                        res.append(py)
-                        continue
-            except Exception:
-                pass
-            res.append(ch.lower())
-        return "".join(res)
-
     def _get_site_icon_map(self) -> Dict[str, str]:
         """获取各站点的 Base64/URL 图标映射。"""
         icon_map = {}
@@ -894,7 +834,7 @@ class FastIntersectSearch(_PluginBase):
 
     def get_page(self) -> Optional[List[dict]]:
         """
-        插件详情页展示：VS Code 深色高级主题站点响应性能大盘（中文清晰排版，大字号）。
+        插件详情页展示：VS Code 深色高级主题站点响应性能大盘。
         """
         if not self._enabled:
             return None
@@ -911,8 +851,8 @@ class FastIntersectSearch(_PluginBase):
         sum_avg = 0.0
 
         table_rows = []
-        # 按站点拼音名称升序排序 (A-Z)
-        sorted_site_items = sorted(site_stats.items(), key=lambda x: self._pinyin_sort_key(x[0]))
+        # 直接使用系统原始站点顺序展示（自然排序）
+        sorted_site_items = list(site_stats.items())
 
         for site_name, s_info in sorted_site_items:
             last_cost = s_info.get("last_cost", 0.0)
@@ -1143,7 +1083,7 @@ class FastIntersectSearch(_PluginBase):
         header_row = {
             "component": "thead",
             "content": [
-                {"component": "th", "props": {"style": f"width: 28%; {th_base}"}, "text": "站点名称 (按拼音排序)"},
+                {"component": "th", "props": {"style": f"width: 28%; {th_base}"}, "text": "站点名称"},
                 {"component": "th", "props": {"style": f"width: 24%; {th_base}"}, "text": "上次响应时间"},
                 {"component": "th", "props": {"style": f"width: 28%; {th_base}"}, "text": "3天内平均响应时间"},
                 {"component": "th", "props": {"style": f"width: 20%; {th_base}"}, "text": "最近测速时间"},
