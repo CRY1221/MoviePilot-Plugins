@@ -1,6 +1,6 @@
 """
 极速并发搜索插件 (FastIntersectSearch)
-1. 无缝接管系统网页前端搜索流 (SearchChain.async_search_by_id_stream / async_search_by_title_stream)；
+1. 无缝接管系统网页前端搜索流 (SearchChain.search_page_events / async_search_by_id_stream / async_search_by_title_stream)；
 2. 跨站点并发检索，单站点内部多轮请求强制 3 秒安全频控防封；
 3. 内存直接调用系统 TorrentHelper.match_torrent 防抓错消歧；
 4. 内存直接调用系统 FilterChain 走底层 Rust 引擎完成规则优先组打分与体积/码率红线过滤；
@@ -105,6 +105,7 @@ class FastIntersectSearch(_PluginBase):
     _site_sleep_seconds: float = 3.0
 
     # 原始 SearchChain 方法句柄备份
+    _orig_search_page_events = None
     _orig_async_search_by_id_stream = None
     _orig_async_search_by_title_stream = None
     _orig_async_search_by_id = None
@@ -131,7 +132,7 @@ class FastIntersectSearch(_PluginBase):
         self._backup_original_methods()
         if self._enabled and self._takeover_web_search:
             self._install_hooks()
-            logger.info("已接管 MoviePilot 系统 SearchChain 搜索流（网页端搜索全面生效极速并发）")
+            logger.info("已成功接管 MoviePilot 系统 SearchChain 搜索流（网页端搜索全面生效极速并发）")
         else:
             self._uninstall_hooks()
             logger.info("已恢复 MoviePilot 原生搜索流")
@@ -144,6 +145,8 @@ class FastIntersectSearch(_PluginBase):
 
     def _backup_original_methods(self) -> None:
         """备份系统原生搜索方法。"""
+        if FastIntersectSearch._orig_search_page_events is None:
+            FastIntersectSearch._orig_search_page_events = SearchChain.search_page_events
         if FastIntersectSearch._orig_async_search_by_id_stream is None:
             FastIntersectSearch._orig_async_search_by_id_stream = SearchChain.async_search_by_id_stream
         if FastIntersectSearch._orig_async_search_by_title_stream is None:
@@ -157,6 +160,52 @@ class FastIntersectSearch(_PluginBase):
         """将系统 SearchChain 的搜索接口替换为极速搜索插件的接管方法。"""
         plugin = self
 
+        async def hooked_search_page_events(
+            chain_self,
+            *,
+            params: dict[str, Any],
+        ) -> AsyncIterator[dict[str, Any]]:
+            """接管 Web 前端手动分页单页搜索 (manual_paging=True)。"""
+            mtype = params.get("mtype")
+            if (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
+                async for evt in plugin._orig_search_page_events(chain_self, params=params):
+                    yield evt
+                return
+
+            token = _in_fastsearch_context.set(True)
+            try:
+                media_source = params.get("media_source")
+                media_id = params.get("media_id")
+                season = params.get("season")
+                sites = params.get("sites")
+                keyword = params.get("keyword")
+
+                if media_source and media_id:
+                    async for event in plugin.stream_search_by_media(
+                        chain_instance=chain_self,
+                        media_source=media_source,
+                        media_id=str(media_id),
+                        mtype=mtype,
+                        season=season,
+                        sites=sites,
+                        cache_local=True,
+                    ):
+                        yield event
+                elif keyword:
+                    async for event in plugin.stream_search_by_title(
+                        chain_instance=chain_self,
+                        title=str(keyword),
+                        sites=sites,
+                        mtype=mtype,
+                        cache_local=True,
+                    ):
+                        yield event
+                else:
+                    async for evt in plugin._orig_search_page_events(chain_self, params=params):
+                        yield evt
+            finally:
+                _in_fastsearch_context.reset(token)
+
         async def hooked_async_search_by_id_stream(
             chain_self,
             media_source: MediaSource,
@@ -169,7 +218,7 @@ class FastIntersectSearch(_PluginBase):
             music_type: Optional[str] = None,
             include_candidates: bool = False,
         ) -> AsyncIterator[dict]:
-            # 音乐搜索或已在内部上下文中时回退原生
+            """接管流式精准媒体搜索。"""
             if music_type or (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
                 async for evt in plugin._orig_async_search_by_id_stream(
                     chain_self, media_source, media_id, mtype=mtype, area=area,
@@ -203,6 +252,7 @@ class FastIntersectSearch(_PluginBase):
             mtype: Optional[MediaType] = None,
             rule_groups: Optional[List[str]] = None,
         ) -> AsyncIterator[dict]:
+            """接管流式模糊标题搜索。"""
             if (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
                 async for evt in plugin._orig_async_search_by_title_stream(
                     chain_self, title=title, page=page, sites=sites,
@@ -237,6 +287,7 @@ class FastIntersectSearch(_PluginBase):
             music_type: Optional[str] = None,
             include_candidates: bool = False,
         ) -> List[Context]:
+            """接管非流式精准媒体搜索。"""
             if music_type or (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
                 return await plugin._orig_async_search_by_id(
                     chain_self, media_source, media_id, mtype=mtype, area=area,
@@ -262,6 +313,7 @@ class FastIntersectSearch(_PluginBase):
             mtype: Optional[MediaType] = None,
             rule_groups: Optional[List[str]] = None,
         ) -> List[Context]:
+            """接管非流式模糊标题搜索。"""
             if (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
                 return await plugin._orig_async_search_by_title(
                     chain_self, title=title, page=page, sites=sites,
@@ -276,6 +328,7 @@ class FastIntersectSearch(_PluginBase):
                     results = event.get("contexts") or []
             return results
 
+        SearchChain.search_page_events = hooked_search_page_events
         SearchChain.async_search_by_id_stream = hooked_async_search_by_id_stream
         SearchChain.async_search_by_title_stream = hooked_async_search_by_title_stream
         SearchChain.async_search_by_id = hooked_async_search_by_id
@@ -283,6 +336,8 @@ class FastIntersectSearch(_PluginBase):
 
     def _uninstall_hooks(self) -> None:
         """恢复系统原生搜索方法。"""
+        if FastIntersectSearch._orig_search_page_events is not None:
+            SearchChain.search_page_events = FastIntersectSearch._orig_search_page_events
         if FastIntersectSearch._orig_async_search_by_id_stream is not None:
             SearchChain.async_search_by_id_stream = FastIntersectSearch._orig_async_search_by_id_stream
         if FastIntersectSearch._orig_async_search_by_title_stream is not None:
@@ -458,27 +513,43 @@ class FastIntersectSearch(_PluginBase):
     async def stream_search_by_media(
         self,
         chain_instance: SearchChain,
-        media_source: MediaSource,
+        media_source: Any,
         media_id: str,
         mtype: Optional[MediaType] = None,
         season: Optional[int] = None,
-        sites: Optional[List[int]] = None,
+        sites: Optional[Any] = None,
         cache_local: bool = False,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         接管网页端精准媒体搜索流 (GET /api/v1/search/media/{media_id}/stream)
         """
         t0 = time.time()
-        logger.info(f"收到网页端精准搜索请求: source={media_source}, id={media_id}, mtype={mtype}, season={season}")
+        # 兼容 media_source 类型
+        if isinstance(media_source, str):
+            try:
+                media_source_enum = MediaSource(media_source)
+            except Exception:
+                media_source_enum = MediaSource.TMDB
+        else:
+            media_source_enum = media_source or MediaSource.TMDB
+
+        # 兼容 sites 类型
+        site_filter: Optional[List[int]] = None
+        if isinstance(sites, str):
+            site_filter = [int(s) for s in sites.split(",") if s.isdigit()]
+        elif isinstance(sites, list):
+            site_filter = [int(s) for s in sites if str(s).isdigit()]
+
+        logger.info(f"收到网页端精准搜索请求: source={media_source_enum}, id={media_id}, mtype={mtype}, season={season}")
 
         # 1. 识别媒体信息
         mediainfo = await MediaChain().async_recognize_media(
-            media_source=media_source,
+            media_source=media_source_enum,
             media_id=media_id,
             mtype=mtype,
         )
         if not mediainfo:
-            logger.error(f"媒体识别失败: {media_source} {media_id}")
+            logger.error(f"媒体识别失败: {media_source_enum} {media_id}")
             yield {"type": "error", "success": False, "message": "媒体信息识别失败"}
             return
 
@@ -502,7 +573,7 @@ class FastIntersectSearch(_PluginBase):
             keywords.append(en_title.strip())
 
         # 2. 获取有效站点列表
-        indexer_sites = await chain_instance._async_indexers(sites, subtitles=False)
+        indexer_sites = await chain_instance._async_indexers(site_filter, subtitles=False)
         if not indexer_sites:
             logger.warning("未匹配到任何有效的搜索站点")
             yield {
@@ -512,8 +583,20 @@ class FastIntersectSearch(_PluginBase):
                 "items": [],
                 "total_items": 0,
                 "candidate_items": 0,
+                "sources": [],
             }
             return
+
+        source_facts = [
+            {
+                "source": str(s.get("id") or s.get("name")),
+                "site_name": s.get("name"),
+                "page": 0,
+                "can_continue": False,
+                "error": None,
+            }
+            for s in indexer_sites
+        ]
 
         logger.info(
             f"开始跨站点并发检索: 目标站点数={len(indexer_sites)}, "
@@ -550,8 +633,10 @@ class FastIntersectSearch(_PluginBase):
                 ]
                 yield {
                     "type": "append",
+                    "stage": "searching",
                     "items": [c.to_dict() for c in temp_contexts],
                     "total_items": len(raw_torrents),
+                    "candidate_items": len(raw_torrents),
                 }
 
         fetch_cost = round(time.time() - t0, 2)
@@ -653,9 +738,19 @@ class FastIntersectSearch(_PluginBase):
         total_cost = round(time.time() - t0, 2)
         logger.info(f"极速搜索全部收敛完成，总耗时 {total_cost}s，最终向前端交付高质量种子 {len(contexts)} 个")
 
-        # 8. 存入系统搜索缓存并向网页端发射收敛完成 SSE 事件
+        # 8. 存入系统搜索缓存并记录上次搜索参数
         if cache_local:
             await chain_instance._async_save_results(contexts)
+            chain_instance.save_last_search_params(
+                keyword=mediainfo.title,
+                media_source=media_source_enum,
+                media_id=str(media_id),
+                mtype=mediainfo.type,
+                area="title",
+                season=season,
+                sites=site_filter,
+                result_type="torrent",
+            )
 
         yield {
             "type": "replace",
@@ -665,6 +760,7 @@ class FastIntersectSearch(_PluginBase):
             "items": [c.to_dict() for c in contexts],
             "total_items": len(contexts),
             "candidate_items": len(raw_torrents),
+            "sources": source_facts,
             "match_counts": {},
         }
         yield {
@@ -675,6 +771,7 @@ class FastIntersectSearch(_PluginBase):
             "items": [c.to_dict() for c in contexts],
             "total_items": len(contexts),
             "candidate_items": len(raw_torrents),
+            "sources": source_facts,
             "match_counts": {},
         }
 
@@ -682,7 +779,7 @@ class FastIntersectSearch(_PluginBase):
         self,
         chain_instance: SearchChain,
         title: str,
-        sites: Optional[List[int]] = None,
+        sites: Optional[Any] = None,
         mtype: Optional[MediaType] = None,
         rule_groups: Optional[List[str]] = None,
         cache_local: bool = False,
@@ -693,17 +790,36 @@ class FastIntersectSearch(_PluginBase):
         t0 = time.time()
         logger.info(f"收到网页端标题搜索请求: keyword='{title}', mtype={mtype}, sites={sites}")
 
-        indexer_sites = await chain_instance._async_indexers(sites, subtitles=False)
+        site_filter: Optional[List[int]] = None
+        if isinstance(sites, str):
+            site_filter = [int(s) for s in sites.split(",") if s.isdigit()]
+        elif isinstance(sites, list):
+            site_filter = [int(s) for s in sites if str(s).isdigit()]
+
+        indexer_sites = await chain_instance._async_indexers(site_filter, subtitles=False)
         if not indexer_sites:
             logger.warning("未匹配到任何有效的搜索站点")
             yield {
                 "type": "done",
+                "stage": "done",
                 "text": "未配置或未启用任何有效搜索站点",
                 "items": [],
                 "total_items": 0,
                 "candidate_items": 0,
+                "sources": [],
             }
             return
+
+        source_facts = [
+            {
+                "source": str(s.get("id") or s.get("name")),
+                "site_name": s.get("name"),
+                "page": 0,
+                "can_continue": False,
+                "error": None,
+            }
+            for s in indexer_sites
+        ]
 
         logger.info(f"开始标题跨站点并发检索: 站点数={len(indexer_sites)}, 关键词='{title}'")
 
@@ -733,8 +849,10 @@ class FastIntersectSearch(_PluginBase):
                 ]
                 yield {
                     "type": "append",
+                    "stage": "searching",
                     "items": [c.to_dict() for c in temp_contexts],
                     "total_items": len(raw_torrents),
+                    "candidate_items": len(raw_torrents),
                 }
 
         # 内存去重
@@ -773,7 +891,24 @@ class FastIntersectSearch(_PluginBase):
 
         if cache_local:
             await chain_instance._async_save_results(contexts)
+            chain_instance.save_last_search_params(
+                keyword=title,
+                mtype=mtype,
+                area="title",
+                sites=site_filter,
+                result_type="torrent",
+            )
 
+        yield {
+            "type": "replace",
+            "stage": "filtered",
+            "value": 100,
+            "text": f"极速过滤完成，共 {len(contexts)} 个优质资源",
+            "items": [c.to_dict() for c in contexts],
+            "total_items": len(contexts),
+            "candidate_items": len(raw_torrents),
+            "sources": source_facts,
+        }
         yield {
             "type": "done",
             "stage": "done",
@@ -782,6 +917,7 @@ class FastIntersectSearch(_PluginBase):
             "items": [c.to_dict() for c in contexts],
             "total_items": len(contexts),
             "candidate_items": len(raw_torrents),
+            "sources": source_facts,
         }
 
     async def execute_tool_search(
