@@ -88,7 +88,7 @@ class FastIntersectSearch(_PluginBase):
         "跨站并发+单站3秒频控，流式流水线即出即洗，"
         "MetaInfo单次复用，Rust前置初筛与定级，完结全集包提权。"
     )
-    plugin_version: str = "1.3.0"
+    plugin_version: str = "1.4.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
@@ -104,6 +104,8 @@ class FastIntersectSearch(_PluginBase):
     _orig_async_search_by_title_stream = None
     _orig_async_search_by_id = None
     _orig_async_search_by_title = None
+    _orig_process = None
+    _orig_async_process = None
 
     @classmethod
     def get_instance(cls) -> Optional["FastIntersectSearch"]:
@@ -146,6 +148,10 @@ class FastIntersectSearch(_PluginBase):
             FastIntersectSearch._orig_async_search_by_id = SearchChain.async_search_by_id
         if FastIntersectSearch._orig_async_search_by_title is None:
             FastIntersectSearch._orig_async_search_by_title = SearchChain.async_search_by_title
+        if FastIntersectSearch._orig_process is None:
+            FastIntersectSearch._orig_process = SearchChain.process
+        if FastIntersectSearch._orig_async_process is None:
+            FastIntersectSearch._orig_async_process = SearchChain.async_process
 
     def _install_hooks(self) -> None:
         """将系统 SearchChain 的搜索接口替换为极速搜索插件的接管方法。"""
@@ -316,11 +322,141 @@ class FastIntersectSearch(_PluginBase):
                 pass
             return collector
 
+        async def hooked_async_process(
+            chain_self,
+            mediainfo: MediaInfo,
+            keyword: Optional[str] = None,
+            no_exists: Optional[dict] = None,
+            sites: Optional[list] = None,
+            rule_groups: Optional[list] = None,
+            area: Optional[str] = "title",
+            custom_words: Optional[list] = None,
+            filter_params: Optional[dict] = None,
+            include_candidates: bool = False,
+            candidate_filter: Optional[Callable] = None,
+        ) -> List[Context]:
+            """
+            接管系统异步 process 入口。
+            """
+            mtype = getattr(mediainfo, "type", None)
+            if (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
+                return await plugin._orig_async_process(
+                    chain_self,
+                    mediainfo=mediainfo,
+                    keyword=keyword,
+                    no_exists=no_exists,
+                    sites=sites,
+                    rule_groups=rule_groups,
+                    area=area,
+                    custom_words=custom_words,
+                    filter_params=filter_params,
+                    include_candidates=include_candidates,
+                    candidate_filter=candidate_filter,
+                )
+
+            token = _in_fastsearch_context.set(True)
+            try:
+                media_source = getattr(mediainfo, "media_source", MediaSource.TMDB) or MediaSource.TMDB
+                media_id = str(getattr(mediainfo, "tmdb_id", None) or getattr(mediainfo, "media_id", "") or "")
+                collector: List[Context] = []
+                if media_id:
+                    async for _ in plugin.stream_search_by_media(
+                        chain_instance=chain_self,
+                        media_source=media_source,
+                        media_id=media_id,
+                        mtype=mtype,
+                        sites=sites,
+                        cache_local=True,
+                        contexts_collector=collector,
+                    ):
+                        pass
+                else:
+                    search_kw = keyword or getattr(mediainfo, "title", "")
+                    async for _ in plugin.stream_search_by_title(
+                        chain_instance=chain_self,
+                        title=str(search_kw),
+                        sites=sites,
+                        mtype=mtype,
+                        rule_groups=rule_groups,
+                        cache_local=True,
+                        contexts_collector=collector,
+                    ):
+                        pass
+                if candidate_filter and collector:
+                    collector = candidate_filter(collector)
+                return collector
+            finally:
+                _in_fastsearch_context.reset(token)
+
+        def hooked_process(
+            chain_self,
+            mediainfo: MediaInfo,
+            keyword: Optional[str] = None,
+            no_exists: Optional[dict] = None,
+            sites: Optional[list] = None,
+            rule_groups: Optional[list] = None,
+            area: Optional[str] = "title",
+            custom_words: Optional[list] = None,
+            filter_params: Optional[dict] = None,
+            include_candidates: bool = False,
+            candidate_filter: Optional[Callable] = None,
+        ) -> List[Context]:
+            """
+            接管系统同步 process 入口（通知渠道点播核心入口：Telegram/微信）。
+            """
+            mtype = getattr(mediainfo, "type", None)
+            if (mtype and mtype == MediaType.MUSIC) or _in_fastsearch_context.get():
+                return plugin._orig_process(
+                    chain_self,
+                    mediainfo=mediainfo,
+                    keyword=keyword,
+                    no_exists=no_exists,
+                    sites=sites,
+                    rule_groups=rule_groups,
+                    area=area,
+                    custom_words=custom_words,
+                    filter_params=filter_params,
+                    include_candidates=include_candidates,
+                    candidate_filter=candidate_filter,
+                )
+
+            logger.info("极速搜索接管通知渠道交互搜索: %s (%s)", getattr(mediainfo, "title", keyword), mtype)
+            coro = hooked_async_process(
+                chain_self=chain_self,
+                mediainfo=mediainfo,
+                keyword=keyword,
+                no_exists=no_exists,
+                sites=sites,
+                rule_groups=rule_groups,
+                area=area,
+                custom_words=custom_words,
+                filter_params=filter_params,
+                include_candidates=include_candidates,
+                candidate_filter=candidate_filter,
+            )
+
+            try:
+                # 尝试获取当前线程运行的事件循环
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                # 处于活跃异步循环中，通过独立线程运行协程，防止阻塞正在运行的循环
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(asyncio.run, coro)
+                    return future.result()
+            else:
+                return asyncio.run(coro)
+
         SearchChain.search_page_events = hooked_search_page_events
         SearchChain.async_search_by_id_stream = hooked_async_search_by_id_stream
         SearchChain.async_search_by_title_stream = hooked_async_search_by_title_stream
         SearchChain.async_search_by_id = hooked_async_search_by_id
         SearchChain.async_search_by_title = hooked_async_search_by_title
+        SearchChain.process = hooked_process
+        SearchChain.async_process = hooked_async_process
 
     def _uninstall_hooks(self) -> None:
         """恢复系统原生搜索方法。"""
@@ -334,6 +470,10 @@ class FastIntersectSearch(_PluginBase):
             SearchChain.async_search_by_id = FastIntersectSearch._orig_async_search_by_id
         if FastIntersectSearch._orig_async_search_by_title is not None:
             SearchChain.async_search_by_title = FastIntersectSearch._orig_async_search_by_title
+        if FastIntersectSearch._orig_process is not None:
+            SearchChain.process = FastIntersectSearch._orig_process
+        if FastIntersectSearch._orig_async_process is not None:
+            SearchChain.async_process = FastIntersectSearch._orig_async_process
 
     def get_state(self) -> bool:
         """获取启用状态。"""
@@ -569,25 +709,6 @@ class FastIntersectSearch(_PluginBase):
             sorted_batch = TorrentHelper.sort_torrents(batch_contexts)
         except Exception as e:
             logger.warning(f"调用系统 TorrentHelper.sort_torrents 异常，回退排序: {e}")
-            sorted_batch = sorted(
-                batch_contexts,
-                key=lambda x: (getattr(x.torrent_info, "pri_order", 0) or 0, getattr(x.torrent_info, "seeders", 0) or 0),
-                reverse=True,
-            )
-
-        return sorted_batch, raw_count
-        for t, meta, _ in valid_items:
-            ctx = Context(
-                torrent_info=t,
-                media_info=mediainfo,
-                meta_info=meta,
-            )
-            batch_contexts.append(ctx)
-
-        try:
-            sorted_batch = TorrentHelper.sort_torrents(batch_contexts)
-        except Exception as e:
-            logger.warning(f"调用系统 TorrentHelper.sort_torrents 异常，回退默认顺序: {e}")
             sorted_batch = sorted(
                 batch_contexts,
                 key=lambda x: (getattr(x.torrent_info, "pri_order", 0) or 0, getattr(x.torrent_info, "seeders", 0) or 0),
