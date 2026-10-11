@@ -88,7 +88,7 @@ class FastIntersectSearch(_PluginBase):
         "跨站高并发+单站3秒频控，流式流水线即出即洗，"
         "接管Web搜索、通知渠道点播与新建订阅首搜，原生规则组排序。"
     )
-    plugin_version: str = "2.3.0"
+    plugin_version: str = "2.4.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
@@ -591,7 +591,12 @@ class FastIntersectSearch(_PluginBase):
                 pass
 
     def _record_site_cost(self, site_name: str, cost: float, success: bool = True) -> None:
-        """记录站点单次请求耗时，并持久化统计（保留最近3天数据）。"""
+        """
+        记录站点单次请求耗时，并动态更新3天滑动窗口平均值。
+        严格对数据负责：
+        1. 写入时彻底剔除任何超过72小时 (3天) 的老旧数据；
+        2. 仅在最近72小时有效采样期内计算加权平均耗时。
+        """
         try:
             now = time.time()
             three_days_ago = now - 3 * 86400
@@ -602,17 +607,29 @@ class FastIntersectSearch(_PluginBase):
             site_data = self._site_stats.setdefault(site_name, {
                 "last_cost": 0.0,
                 "last_time": 0,
+                "avg_cost_3d": 0.0,
+                "sample_count_3d": 0,
                 "history": [],
             })
 
-            site_data["last_cost"] = round(cost, 2)
+            cost_val = round(cost, 2)
+            site_data["last_cost"] = cost_val
             site_data["last_time"] = int(now)
 
             history = site_data.get("history") or []
-            # 过滤掉超过3天的历史，并加入本次记录
-            valid_history = [item for item in history if item.get("t", 0) >= three_days_ago]
-            valid_history.append({"t": int(now), "c": round(cost, 2), "s": success})
-            site_data["history"] = valid_history[-100:]  # 最多保留100条采样
+            # 严格过滤：超期数据坚决丢弃，绝不混入老旧采样
+            valid_history = [item for item in history if item.get("t", 0) >= three_days_ago and item.get("c") is not None]
+            valid_history.append({"t": int(now), "c": cost_val, "s": success})
+            site_data["history"] = valid_history[-100:]  # 保持窗口内上限
+
+            # 每次搜索均实时重算并更新3天均值
+            valid_costs = [item["c"] for item in valid_history if item.get("c") is not None]
+            if valid_costs:
+                site_data["avg_cost_3d"] = round(sum(valid_costs) / len(valid_costs), 2)
+                site_data["sample_count_3d"] = len(valid_costs)
+            else:
+                site_data["avg_cost_3d"] = cost_val
+                site_data["sample_count_3d"] = 1
 
             self.save_data("site_stats", self._site_stats)
         except Exception as e:
@@ -887,7 +904,7 @@ class FastIntersectSearch(_PluginBase):
             else:
                 time_str = "--"
 
-            # 站点Logo与名称（居中对齐，精致徽标）
+            # 站点Logo与名称（表头居中，下方单元格内容自然优雅左对齐，带适度左侧内边距）
             site_icon_src = icon_map.get(site_name)
             avatar_content = []
             if site_icon_src:
@@ -908,11 +925,11 @@ class FastIntersectSearch(_PluginBase):
 
             site_cell = {
                 "component": "td",
-                "props": {"style": "width: 25%; text-align: center; vertical-align: middle; padding: 14px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.05);"},
+                "props": {"style": "width: 25%; text-align: left; vertical-align: middle; padding: 14px 12px 14px 28px; border-bottom: 1px solid rgba(255, 255, 255, 0.05);"},
                 "content": [
                     {
                         "component": "div",
-                        "props": {"style": "display: inline-flex; align-items: center; justify-content: center; gap: 10px;"},
+                        "props": {"style": "display: flex; align-items: center; justify-content: flex-start; gap: 10px;"},
                         "content": [
                             {
                                 "component": "VAvatar",
