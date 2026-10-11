@@ -88,7 +88,7 @@ class FastIntersectSearch(_PluginBase):
         "跨站高并发+单站3秒频控，流式流水线即出即洗，"
         "接管Web搜索、通知渠道点播与新建订阅首搜，原生规则组排序。"
     )
-    plugin_version: str = "2.2.0"
+    plugin_version: str = "2.3.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
@@ -834,8 +834,8 @@ class FastIntersectSearch(_PluginBase):
 
     def get_page(self) -> Optional[List[dict]]:
         """
-        插件详情页展示：融入 MoviePilot 原生纯正深色主题的响应性能总览大盘。
-        特点：全列严格居中对齐、去除灰褐杂色底、原生卡片与边框质感、克制优雅配色。
+        插件详情页展示：黑曜石现代极简玻璃拟态（Obsidian Glassmorphism）风格耗时总览大盘。
+        特点：微透暗色流光底板、全居中对称排版、精致徽章胶囊、发光渐变指标卡。
         """
         if not self._enabled:
             return None
@@ -885,9 +885,9 @@ class FastIntersectSearch(_PluginBase):
                 else:
                     time_str = f"{elapsed // 86400} 天前"
             else:
-                time_str = "暂无记录"
+                time_str = "--"
 
-            # 站点Logo与名称（居中对齐）
+            # 站点Logo与名称（居中对齐，精致徽标）
             site_icon_src = icon_map.get(site_name)
             avatar_content = []
             if site_icon_src:
@@ -895,20 +895,20 @@ class FastIntersectSearch(_PluginBase):
                     "component": "VImg",
                     "props": {
                         "src": site_icon_src,
-                        "width": 24,
-                        "height": 24,
+                        "width": 20,
+                        "height": 20,
                     },
                 })
             else:
                 avatar_content.append({
                     "component": "span",
-                    "props": {"class": "text-caption font-weight-bold"},
+                    "props": {"style": "font-size: 12px; font-weight: 700; color: #38bdf8;"},
                     "text": site_name[:1],
                 })
 
             site_cell = {
                 "component": "td",
-                "props": {"style": "width: 25%; text-align: center; vertical-align: middle;"},
+                "props": {"style": "width: 25%; text-align: center; vertical-align: middle; padding: 14px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.05);"},
                 "content": [
                     {
                         "component": "div",
@@ -917,15 +917,15 @@ class FastIntersectSearch(_PluginBase):
                             {
                                 "component": "VAvatar",
                                 "props": {
-                                    "size": 28,
-                                    "rounded": "sm",
-                                    "style": "flex-shrink: 0;",
+                                    "size": 30,
+                                    "rounded": "md",
+                                    "style": "background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 2px 6px rgba(0,0,0,0.3); flex-shrink: 0;",
                                 },
                                 "content": avatar_content,
                             },
                             {
                                 "component": "span",
-                                "props": {"class": "font-weight-medium"},
+                                "props": {"style": "color: #f1f5f9; font-weight: 600; font-size: 14px; letter-spacing: 0.3px;"},
                                 "text": site_name,
                             },
                         ],
@@ -933,46 +933,83 @@ class FastIntersectSearch(_PluginBase):
                 ],
             }
 
-            # 上次耗时（居中对齐，克制柔和色）
-            cost_color = "text-success" if last_cost < 3.0 else ("text-warning" if last_cost < 8.0 else "text-error")
+            # 上次响应时间（居中精致徽章胶囊）
+            if last_cost < 2.0:
+                cost_border = "rgba(52, 211, 153, 0.35)"
+                cost_bg = "rgba(16, 185, 129, 0.12)"
+                cost_color = "#34d399"
+                cost_glow = "0 0 10px rgba(16, 185, 129, 0.15)"
+            elif last_cost < 6.0:
+                cost_border = "rgba(251, 191, 36, 0.35)"
+                cost_bg = "rgba(245, 158, 11, 0.12)"
+                cost_color = "#fbbf24"
+                cost_glow = "none"
+            else:
+                cost_border = "rgba(248, 113, 113, 0.35)"
+                cost_bg = "rgba(239, 68, 68, 0.12)"
+                cost_color = "#f87171"
+                cost_glow = "none"
+
             last_cost_cell = {
                 "component": "td",
-                "props": {"style": "width: 25%; text-align: center; vertical-align: middle;"},
+                "props": {"style": "width: 25%; text-align: center; vertical-align: middle; padding: 14px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.05);"},
                 "content": [
                     {
-                        "component": "span",
-                        "props": {"class": f"{cost_color} font-weight-bold"},
-                        "text": f"{last_cost:.2f} 秒",
+                        "component": "div",
+                        "props": {"style": "display: inline-flex; justify-content: center;"},
+                        "content": [
+                            {
+                                "component": "span",
+                                "props": {
+                                    "style": (
+                                        f"display: inline-block; padding: 3px 12px; border-radius: 20px; "
+                                        f"background: {cost_bg}; border: 1px solid {cost_border}; "
+                                        f"color: {cost_color}; font-size: 13px; font-weight: 700; "
+                                        f"font-family: monospace; box-shadow: {cost_glow}; letter-spacing: 0.5px;"
+                                    )
+                                },
+                                "text": f"{last_cost:.2f} s",
+                            }
+                        ],
                     }
                 ],
             }
 
-            avg_color = "text-success" if avg_cost < 3.0 else ("text-warning" if avg_cost < 8.0 else "text-error")
+            # 3天平均耗时（居中排版）
+            avg_color = "#34d399" if avg_cost < 3.0 else ("#fbbf24" if avg_cost < 7.0 else "#f87171")
             avg_cost_cell = {
                 "component": "td",
-                "props": {"style": "width: 25%; text-align: center; vertical-align: middle;"},
+                "props": {"style": "width: 25%; text-align: center; vertical-align: middle; padding: 14px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.05);"},
                 "content": [
                     {
-                        "component": "span",
-                        "props": {"class": f"{avg_color} font-weight-medium"},
-                        "text": f"{avg_cost:.2f} 秒",
-                    },
-                    {
-                        "component": "span",
-                        "props": {"class": "text-caption text-medium-emphasis ms-2"},
-                        "text": f"({sample_count}次)",
-                    },
+                        "component": "div",
+                        "props": {"style": "display: inline-flex; align-items: baseline; justify-content: center; gap: 6px;"},
+                        "content": [
+                            {
+                                "component": "span",
+                                "props": {"style": f"color: {avg_color}; font-weight: 700; font-size: 14px; font-family: monospace;"},
+                                "text": f"{avg_cost:.2f} s",
+                            },
+                            {
+                                "component": "span",
+                                "props": {"style": "color: #64748b; font-size: 11px; font-weight: 500;"},
+                                "text": f"({sample_count}次)",
+                            },
+                        ],
+                    }
                 ],
             }
 
+            # 测速时间（柔和低调）
             time_cell = {
                 "component": "td",
-                "props": {"class": "text-medium-emphasis text-caption", "style": "width: 25%; text-align: center; vertical-align: middle;"},
+                "props": {"style": "width: 25%; text-align: center; vertical-align: middle; padding: 14px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); color: #94a3b8; font-size: 13px; font-family: monospace;"},
                 "text": time_str,
             }
 
             table_rows.append({
                 "component": "tr",
+                "props": {"style": "transition: background 0.2s ease;"},
                 "content": [site_cell, last_cost_cell, avg_cost_cell, time_cell],
             })
 
@@ -986,9 +1023,14 @@ class FastIntersectSearch(_PluginBase):
                             "props": {"cols": 12},
                             "content": [
                                 {
-                                    "component": "VCard",
-                                    "props": {"class": "pa-6 text-center text-medium-emphasis"},
-                                    "text": "暂无站点响应耗时统计数据，发起一次搜索后将在此自动生成总览。",
+                                    "component": "div",
+                                    "props": {
+                                        "style": (
+                                            "background: rgba(255, 255, 255, 0.02); border: 1px dashed rgba(255, 255, 255, 0.12); "
+                                            "border-radius: 12px; padding: 36px; text-align: center; color: #94a3b8; font-size: 14px;"
+                                        )
+                                    },
+                                    "text": "📊 暂无站点响应耗时统计数据，发起一次搜索后将在此自动生成总览大盘。",
                                 }
                             ],
                         }
@@ -996,20 +1038,29 @@ class FastIntersectSearch(_PluginBase):
                 }
             ]
 
-        # 顶部三项核心指标（原生卡片、克制居中）
+        # 顶部三项核心指标卡片：现代暗夜黑曜石质感，微光边框与渐变高光
         overall_avg = round(sum_avg / max(1, total_sites), 2)
         stat_cards = [
             {
                 "label": "站点总数",
-                "val": f"{total_sites} 个",
+                "val": f"{total_sites}",
+                "unit": "个活跃源",
+                "gradient": "linear-gradient(135deg, #38bdf8 0%, #0284c7 100%)",
+                "accent": "#38bdf8",
             },
             {
-                "label": "秒级响应站点 ( < 3秒 )",
+                "label": "秒级响应站点 ( < 3s )",
                 "val": f"{fast_sites} / {total_sites}",
+                "unit": "高速流水线",
+                "gradient": "linear-gradient(135deg, #34d399 0%, #059669 100%)",
+                "accent": "#34d399",
             },
             {
-                "label": "全站平均响应时间",
-                "val": f"{overall_avg} 秒",
+                "label": "全站平均响应耗时",
+                "val": f"{overall_avg}",
+                "unit": "秒基准平响",
+                "gradient": "linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%)",
+                "accent": "#a78bfa",
             },
         ]
 
@@ -1020,26 +1071,60 @@ class FastIntersectSearch(_PluginBase):
                 "props": {"cols": 12, "md": 4},
                 "content": [
                     {
-                        "component": "VCard",
-                        "props": {"class": "pa-4 text-center", "elevation": 0, "border": True},
+                        "component": "div",
+                        "props": {
+                            "style": (
+                                "background: rgba(255, 255, 255, 0.025); "
+                                "border: 1px solid rgba(255, 255, 255, 0.08); "
+                                "border-radius: 12px; padding: 18px 20px; text-align: center; "
+                                "box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25); position: relative; overflow: hidden;"
+                            )
+                        },
                         "content": [
+                            # 顶部微发光细线条
                             {
                                 "component": "div",
-                                "props": {"class": "text-caption text-medium-emphasis mb-1"},
+                                "props": {
+                                    "style": (
+                                        f"position: absolute; top: 0; left: 20%; right: 20%; height: 2px; "
+                                        f"background: {c['gradient']}; opacity: 0.8; filter: blur(1px);"
+                                    )
+                                },
+                            },
+                            {
+                                "component": "div",
+                                "props": {"style": "color: #94a3b8; font-size: 13px; font-weight: 500; letter-spacing: 0.5px; margin-bottom: 6px;"},
                                 "text": c["label"],
                             },
                             {
                                 "component": "div",
-                                "props": {"class": "text-h5 font-weight-bold text-primary"},
-                                "text": c["val"],
+                                "props": {"style": "display: flex; align-items: baseline; justify-content: center; gap: 6px;"},
+                                "content": [
+                                    {
+                                        "component": "span",
+                                        "props": {
+                                            "style": (
+                                                f"font-size: 30px; font-weight: 800; font-family: monospace; "
+                                                f"background: {c['gradient']}; -webkit-background-clip: text; "
+                                                "-webkit-text-fill-color: transparent; line-height: 1.1;"
+                                            )
+                                        },
+                                        "text": c["val"],
+                                    },
+                                    {
+                                        "component": "span",
+                                        "props": {"style": "color: #64748b; font-size: 12px; font-weight: 500;"},
+                                        "text": c["unit"],
+                                    },
+                                ],
                             },
                         ],
                     }
                 ],
             })
 
-        # 表头四列，强制居中对齐，各占 25%
-        header_th_style = "width: 25%; text-align: center; vertical-align: middle; font-weight: bold;"
+        # 表头四列，精致微光表头，强制居中对齐
+        header_th_style = "width: 25%; text-align: center; vertical-align: middle; padding: 14px 12px; color: #94a3b8; font-weight: 600; font-size: 13px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); letter-spacing: 0.5px;"
         header_row = {
             "component": "thead",
             "content": [
@@ -1051,13 +1136,13 @@ class FastIntersectSearch(_PluginBase):
         }
 
         page = [
-            # 顶部统计卡片
+            # 顶部微光卡片
             {
                 "component": "VRow",
                 "props": {"class": "mb-4"},
                 "content": card_cols,
             },
-            # 下方主看板表格（原生卡片质感，去除灰褐杂底）
+            # 下方主看板表格（玻璃拟态暗色容器）
             {
                 "component": "VRow",
                 "content": [
@@ -1066,39 +1151,58 @@ class FastIntersectSearch(_PluginBase):
                         "props": {"cols": 12},
                         "content": [
                             {
-                                "component": "VCard",
-                                "props": {"elevation": 0, "border": True},
+                                "component": "div",
+                                "props": {
+                                    "style": (
+                                        "background: rgba(255, 255, 255, 0.02); "
+                                        "border: 1px solid rgba(255, 255, 255, 0.07); "
+                                        "border-radius: 12px; overflow: hidden; "
+                                        "box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);"
+                                    )
+                                },
                                 "content": [
                                     {
-                                        "component": "VCardItem",
-                                        "props": {"class": "py-3 px-4"},
+                                        "component": "div",
+                                        "props": {
+                                            "style": (
+                                                "background: rgba(255, 255, 255, 0.02); padding: 14px 20px; "
+                                                "display: flex; align-items: center; justify-content: space-between; "
+                                                "border-bottom: 1px solid rgba(255, 255, 255, 0.06);"
+                                            )
+                                        },
                                         "content": [
                                             {
                                                 "component": "div",
-                                                "props": {"class": "d-flex align-center justify-space-between w-100"},
+                                                "props": {"style": "display: flex; align-items: center; gap: 10px;"},
                                                 "content": [
                                                     {
-                                                        "component": "div",
-                                                        "props": {"class": "text-subtitle-1 font-weight-bold"},
-                                                        "text": "搜索耗时总览",
+                                                        "component": "span",
+                                                        "props": {
+                                                            "style": (
+                                                                "display: inline-block; width: 8px; height: 8px; border-radius: 50%; "
+                                                                "background: #10b981; box-shadow: 0 0 8px #10b981;"
+                                                            )
+                                                        },
                                                     },
                                                     {
-                                                        "component": "div",
-                                                        "props": {"class": "text-caption text-medium-emphasis"},
-                                                        "text": "每次搜索自动刷新 · 3天滑动采样",
+                                                        "component": "span",
+                                                        "props": {"style": "color: #f8fafc; font-size: 15px; font-weight: 700; letter-spacing: 0.3px;"},
+                                                        "text": "搜索耗时总览",
                                                     },
                                                 ],
-                                            }
+                                            },
+                                            {
+                                                "component": "span",
+                                                "props": {"style": "color: #64748b; font-size: 12px; font-weight: 500; font-family: monospace;"},
+                                                "text": "实时自动打点 · 72H滑动窗口",
+                                            },
                                         ],
-                                    },
-                                    {
-                                        "component": "VDivider",
                                     },
                                     {
                                         "component": "VTable",
                                         "props": {
                                             "hover": True,
-                                            "class": "w-100",
+                                            "style": "background: transparent; width: 100%; border-collapse: collapse;",
                                         },
                                         "content": [
                                             header_row,
