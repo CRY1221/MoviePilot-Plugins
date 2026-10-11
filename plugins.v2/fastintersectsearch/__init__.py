@@ -88,12 +88,13 @@ class FastIntersectSearch(_PluginBase):
         "跨站并发+单站3秒频控，流式流水线即出即洗，"
         "MetaInfo单次复用，Rust前置初筛与定级，完结全集包提权。"
     )
-    plugin_version: str = "1.4.0"
+    plugin_version: str = "1.5.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
     _instance: Optional["FastIntersectSearch"] = None
     _enabled: bool = True
+    _bilingual_search: bool = True
     _default_top_k: int = 0
     _search_timeout: int = 15
     _site_sleep_seconds: float = 3.0
@@ -117,6 +118,7 @@ class FastIntersectSearch(_PluginBase):
         FastIntersectSearch._instance = self
         config = config or {}
         self._enabled = bool(config.get("enabled", True))
+        self._bilingual_search = bool(config.get("bilingual_search", True))
         self._default_top_k = int(config.get("default_top_k", 0) or 0)
         self._search_timeout = int(config.get("search_timeout", 15) or 15)
         self._site_sleep_seconds = float(config.get("site_sleep_seconds", 3.0) or 3.0)
@@ -132,6 +134,7 @@ class FastIntersectSearch(_PluginBase):
 
         logger.info(
             f"极速搜索插件初始化完成: enabled={self._enabled}, "
+            f"双语搜索={self._bilingual_search}, "
             f"单站间隔={self._site_sleep_seconds}s, "
             f"默认TopK={self._default_top_k}, 单站超时={self._search_timeout}s"
         )
@@ -504,7 +507,14 @@ class FastIntersectSearch(_PluginBase):
                         "component": "VSwitch",
                         "props": {
                             "model": "enabled",
-                            "label": "启用极速并发搜索插件（默认自动接管网页端搜索流并应用系统规则链）",
+                            "label": "启用极速并发搜索插件（默认自动接管网页端搜索流与通知渠道点播）",
+                        },
+                    },
+                    {
+                        "component": "VSwitch",
+                        "props": {
+                            "model": "bilingual_search",
+                            "label": "中英双语搜索（开启后同时检索中文名与英文原名/译名；关闭后仅检索单一主标题）",
                         },
                     },
                     {
@@ -536,6 +546,7 @@ class FastIntersectSearch(_PluginBase):
         ]
         default = {
             "enabled": True,
+            "bilingual_search": True,
             "site_sleep_seconds": 3.0,
             "search_timeout": 15,
             "default_top_k": 0,
@@ -832,9 +843,10 @@ class FastIntersectSearch(_PluginBase):
 
         # 整理中英搜索关键词
         keywords = [mediainfo.title]
-        en_title = getattr(mediainfo, "original_title", None) or getattr(mediainfo, "en_title", None)
-        if en_title and en_title.strip() and en_title.strip().lower() != mediainfo.title.lower():
-            keywords.append(en_title.strip())
+        if self._bilingual_search:
+            en_title = getattr(mediainfo, "original_title", None) or getattr(mediainfo, "en_title", None)
+            if en_title and en_title.strip() and en_title.strip().lower() != mediainfo.title.lower():
+                keywords.append(en_title.strip())
 
         # 2. 获取有效站点列表
         indexer_sites = await chain_instance._async_indexers(site_filter, subtitles=False)
@@ -1050,7 +1062,21 @@ class FastIntersectSearch(_PluginBase):
             for s in indexer_sites
         ]
 
-        logger.info(f"开始标题跨站点流式检索: 站点数={len(indexer_sites)}, 关键词='{title}'")
+        # 整理标题搜索关键词
+        keywords = [title]
+        if self._bilingual_search:
+            try:
+                from app.chain.media import MediaChain
+                from app.domain.meta.metabase import MetaBase
+                rec_media = await MediaChain().async_recognize_media(meta=MetaBase(title=title))
+                if rec_media:
+                    en_t = getattr(rec_media, "original_title", None) or getattr(rec_media, "en_title", None)
+                    if en_t and en_t.strip() and en_t.strip().lower() != title.lower():
+                        keywords.append(en_t.strip())
+            except Exception:
+                pass
+
+        logger.info(f"开始标题跨站点流式检索: 站点数={len(indexer_sites)}, 关键词={keywords}")
 
         queue: asyncio.Queue = asyncio.Queue()
         producer_tasks = [
@@ -1058,7 +1084,7 @@ class FastIntersectSearch(_PluginBase):
                 self._site_producer(
                     chain_instance=chain_instance,
                     site=s,
-                    keywords=[title],
+                    keywords=keywords,
                     mtype=mtype,
                     queue=queue,
                 )
