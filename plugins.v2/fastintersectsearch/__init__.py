@@ -88,7 +88,7 @@ class FastIntersectSearch(_PluginBase):
         "跨站高并发+单站3秒频控，流式流水线即出即洗，"
         "接管Web搜索、通知渠道点播与新建订阅首搜，原生规则组排序。"
     )
-    plugin_version: str = "2.1.0"
+    plugin_version: str = "2.2.0"
     plugin_author: str = "CRY1221"
     plugin_order: int = 30
 
@@ -834,7 +834,8 @@ class FastIntersectSearch(_PluginBase):
 
     def get_page(self) -> Optional[List[dict]]:
         """
-        插件详情页展示：VS Code 深色高级主题站点响应性能大盘。
+        插件详情页展示：融入 MoviePilot 原生纯正深色主题的响应性能总览大盘。
+        特点：全列严格居中对齐、去除灰褐杂色底、原生卡片与边框质感、克制优雅配色。
         """
         if not self._enabled:
             return None
@@ -851,7 +852,6 @@ class FastIntersectSearch(_PluginBase):
         sum_avg = 0.0
 
         table_rows = []
-        # 直接使用系统原始站点顺序展示（自然排序）
         sorted_site_items = list(site_stats.items())
 
         for site_name, s_info in sorted_site_items:
@@ -887,7 +887,7 @@ class FastIntersectSearch(_PluginBase):
             else:
                 time_str = "暂无记录"
 
-            # 站点Logo与名称（字号放大，清晰大方）
+            # 站点Logo与名称（居中对齐）
             site_icon_src = icon_map.get(site_name)
             avatar_content = []
             if site_icon_src:
@@ -895,37 +895,37 @@ class FastIntersectSearch(_PluginBase):
                     "component": "VImg",
                     "props": {
                         "src": site_icon_src,
-                        "width": 26,
-                        "height": 26,
+                        "width": 24,
+                        "height": 24,
                     },
                 })
             else:
                 avatar_content.append({
                     "component": "span",
-                    "props": {"style": "font-size: 14px; font-weight: bold; color: #569cd6;"},
+                    "props": {"class": "text-caption font-weight-bold"},
                     "text": site_name[:1],
                 })
 
             site_cell = {
                 "component": "td",
-                "props": {"style": "width: 28%; padding: 12px 16px; border-bottom: 1px solid #2d2d2d; vertical-align: middle;"},
+                "props": {"style": "width: 25%; text-align: center; vertical-align: middle;"},
                 "content": [
                     {
                         "component": "div",
-                        "props": {"style": "display: flex; align-items: center; gap: 12px;"},
+                        "props": {"style": "display: inline-flex; align-items: center; justify-content: center; gap: 10px;"},
                         "content": [
                             {
                                 "component": "VAvatar",
                                 "props": {
-                                    "size": 30,
+                                    "size": 28,
                                     "rounded": "sm",
-                                    "style": "background-color: #252526; border: 1px solid #3c3c3c; flex-shrink: 0;",
+                                    "style": "flex-shrink: 0;",
                                 },
                                 "content": avatar_content,
                             },
                             {
                                 "component": "span",
-                                "props": {"style": "color: #ffffff; font-weight: 600; font-size: 14px; letter-spacing: 0.3px;"},
+                                "props": {"class": "font-weight-medium"},
                                 "text": site_name,
                             },
                         ],
@@ -933,76 +933,46 @@ class FastIntersectSearch(_PluginBase):
                 ],
             }
 
-            # 状态中文标签与上次耗时
-            if last_cost < 2.0:
-                cost_color = "#4ec9b0"
-                tag_bg = "rgba(78, 201, 176, 0.16)"
-                tag_text = "极速"
-            elif last_cost < 6.0:
-                cost_color = "#dcdcaa"
-                tag_bg = "rgba(220, 220, 170, 0.16)"
-                tag_text = "良好"
-            else:
-                cost_color = "#f44747"
-                tag_bg = "rgba(244, 71, 71, 0.16)"
-                tag_text = "较慢"
-
+            # 上次耗时（居中对齐，克制柔和色）
+            cost_color = "text-success" if last_cost < 3.0 else ("text-warning" if last_cost < 8.0 else "text-error")
             last_cost_cell = {
                 "component": "td",
-                "props": {"style": "width: 24%; padding: 12px 16px; border-bottom: 1px solid #2d2d2d; vertical-align: middle;"},
+                "props": {"style": "width: 25%; text-align: center; vertical-align: middle;"},
                 "content": [
                     {
-                        "component": "div",
-                        "props": {"style": "display: flex; align-items: center; gap: 8px;"},
-                        "content": [
-                            {
-                                "component": "span",
-                                "props": {
-                                    "style": (
-                                        f"background: {tag_bg}; color: {cost_color}; "
-                                        "font-size: 11px; font-weight: bold; padding: 2px 6px; "
-                                        "border-radius: 4px;"
-                                    )
-                                },
-                                "text": tag_text,
-                            },
-                            {
-                                "component": "span",
-                                "props": {"style": f"color: {cost_color}; font-weight: 700; font-size: 14px; font-family: monospace;"},
-                                "text": f"{last_cost:.2f} 秒",
-                            },
-                        ],
+                        "component": "span",
+                        "props": {"class": f"{cost_color} font-weight-bold"},
+                        "text": f"{last_cost:.2f} 秒",
                     }
                 ],
             }
 
-            avg_color = "#4ec9b0" if avg_cost < 3.0 else ("#dcdcaa" if avg_cost < 7.0 else "#f44747")
+            avg_color = "text-success" if avg_cost < 3.0 else ("text-warning" if avg_cost < 8.0 else "text-error")
             avg_cost_cell = {
                 "component": "td",
-                "props": {"style": "width: 28%; padding: 12px 16px; border-bottom: 1px solid #2d2d2d; vertical-align: middle;"},
+                "props": {"style": "width: 25%; text-align: center; vertical-align: middle;"},
                 "content": [
                     {
                         "component": "span",
-                        "props": {"style": f"color: {avg_color}; font-weight: 600; font-size: 14px; font-family: monospace;"},
-                        "text": f"{avg_cost:.2f} 秒 ",
+                        "props": {"class": f"{avg_color} font-weight-medium"},
+                        "text": f"{avg_cost:.2f} 秒",
                     },
                     {
                         "component": "span",
-                        "props": {"style": "color: #858585; font-size: 12px; margin-left: 4px;"},
-                        "text": f"({sample_count} 次采样)",
+                        "props": {"class": "text-caption text-medium-emphasis ms-2"},
+                        "text": f"({sample_count}次)",
                     },
                 ],
             }
 
             time_cell = {
                 "component": "td",
-                "props": {"style": "width: 20%; padding: 12px 16px; border-bottom: 1px solid #2d2d2d; color: #a0a0a0; font-size: 13px; vertical-align: middle;"},
+                "props": {"class": "text-medium-emphasis text-caption", "style": "width: 25%; text-align: center; vertical-align: middle;"},
                 "text": time_str,
             }
 
             table_rows.append({
                 "component": "tr",
-                "props": {"style": "transition: background 0.15s;"},
                 "content": [site_cell, last_cost_cell, avg_cost_cell, time_cell],
             })
 
@@ -1016,14 +986,9 @@ class FastIntersectSearch(_PluginBase):
                             "props": {"cols": 12},
                             "content": [
                                 {
-                                    "component": "div",
-                                    "props": {
-                                        "style": (
-                                            "background-color: #1e1e1e; border: 1px solid #2d2d2d; "
-                                            "border-radius: 8px; padding: 28px; text-align: center; color: #a0a0a0; font-size: 14px;"
-                                        )
-                                    },
-                                    "text": "📊 暂无站点响应耗时统计数据，发起一次搜索后将在此自动生成测速大盘。",
+                                    "component": "VCard",
+                                    "props": {"class": "pa-6 text-center text-medium-emphasis"},
+                                    "text": "暂无站点响应耗时统计数据，发起一次搜索后将在此自动生成总览。",
                                 }
                             ],
                         }
@@ -1031,7 +996,7 @@ class FastIntersectSearch(_PluginBase):
                 }
             ]
 
-        # 顶部三项核心指标（紧凑缩小、颜色统一高级蓝 #569cd6、去掉注释）
+        # 顶部三项核心指标（原生卡片、克制居中）
         overall_avg = round(sum_avg / max(1, total_sites), 2)
         stat_cards = [
             {
@@ -1055,23 +1020,17 @@ class FastIntersectSearch(_PluginBase):
                 "props": {"cols": 12, "md": 4},
                 "content": [
                     {
-                        "component": "div",
-                        "props": {
-                            "style": (
-                                "background-color: #1e1e1e; border: 1px solid #2d2d2d; "
-                                "border-left: 3px solid #569cd6; "
-                                "border-radius: 6px; padding: 12px 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.25);"
-                            )
-                        },
+                        "component": "VCard",
+                        "props": {"class": "pa-4 text-center", "elevation": 0, "border": True},
                         "content": [
                             {
                                 "component": "div",
-                                "props": {"style": "color: #858585; font-size: 12px; font-weight: 500; letter-spacing: 0.3px;"},
+                                "props": {"class": "text-caption text-medium-emphasis mb-1"},
                                 "text": c["label"],
                             },
                             {
                                 "component": "div",
-                                "props": {"style": "color: #569cd6; font-size: 22px; font-weight: 700; font-family: monospace; margin-top: 4px;"},
+                                "props": {"class": "text-h5 font-weight-bold text-primary"},
                                 "text": c["val"],
                             },
                         ],
@@ -1079,14 +1038,15 @@ class FastIntersectSearch(_PluginBase):
                 ],
             })
 
-        th_base = "padding: 12px 16px; color: #9cdcfe; font-weight: 600; font-size: 13px; border-bottom: 2px solid #333333; text-align: left; vertical-align: middle;"
+        # 表头四列，强制居中对齐，各占 25%
+        header_th_style = "width: 25%; text-align: center; vertical-align: middle; font-weight: bold;"
         header_row = {
             "component": "thead",
             "content": [
-                {"component": "th", "props": {"style": f"width: 28%; {th_base}"}, "text": "站点名称"},
-                {"component": "th", "props": {"style": f"width: 24%; {th_base}"}, "text": "上次响应时间"},
-                {"component": "th", "props": {"style": f"width: 28%; {th_base}"}, "text": "3天内平均响应时间"},
-                {"component": "th", "props": {"style": f"width: 20%; {th_base}"}, "text": "最近测速时间"},
+                {"component": "th", "props": {"style": header_th_style}, "text": "站点名称"},
+                {"component": "th", "props": {"style": header_th_style}, "text": "上次响应时间"},
+                {"component": "th", "props": {"style": header_th_style}, "text": "3天内平均响应时间"},
+                {"component": "th", "props": {"style": header_th_style}, "text": "最近测速时间"},
             ],
         }
 
@@ -1094,10 +1054,10 @@ class FastIntersectSearch(_PluginBase):
             # 顶部统计卡片
             {
                 "component": "VRow",
-                "props": {"class": "mb-3"},
+                "props": {"class": "mb-4"},
                 "content": card_cols,
             },
-            # 下方主看板表格
+            # 下方主看板表格（原生卡片质感，去除灰褐杂底）
             {
                 "component": "VRow",
                 "content": [
@@ -1106,44 +1066,39 @@ class FastIntersectSearch(_PluginBase):
                         "props": {"cols": 12},
                         "content": [
                             {
-                                "component": "div",
-                                "props": {
-                                    "style": (
-                                        "background-color: #1e1e1e; border: 1px solid #2d2d2d; "
-                                        "border-radius: 8px; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.35);"
-                                    )
-                                },
+                                "component": "VCard",
+                                "props": {"elevation": 0, "border": True},
                                 "content": [
                                     {
-                                        "component": "div",
-                                        "props": {
-                                            "style": (
-                                                "background-color: #252526; padding: 12px 16px; "
-                                                "display: flex; align-items: center; justify-content: space-between; "
-                                                "border-bottom: 1px solid #333333;"
-                                            )
-                                        },
+                                        "component": "VCardItem",
+                                        "props": {"class": "py-3 px-4"},
                                         "content": [
                                             {
                                                 "component": "div",
-                                                "props": {"style": "display: flex; align-items: center; gap: 8px;"},
+                                                "props": {"class": "d-flex align-center justify-space-between w-100"},
                                                 "content": [
-                                                    {"component": "span", "props": {"style": "display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #4ec9b0;"}},
-                                                    {"component": "span", "props": {"style": "color: #ffffff; font-size: 14px; font-weight: bold;"}, "text": "搜索耗时总览"},
+                                                    {
+                                                        "component": "div",
+                                                        "props": {"class": "text-subtitle-1 font-weight-bold"},
+                                                        "text": "搜索耗时总览",
+                                                    },
+                                                    {
+                                                        "component": "div",
+                                                        "props": {"class": "text-caption text-medium-emphasis"},
+                                                        "text": "每次搜索自动刷新 · 3天滑动采样",
+                                                    },
                                                 ],
-                                            },
-                                            {
-                                                "component": "span",
-                                                "props": {"style": "color: #6a9955; font-size: 12px; font-weight: 500;"},
-                                                "text": "每次搜索自动刷新 · 3天滑动采样",
-                                            },
+                                            }
                                         ],
+                                    },
+                                    {
+                                        "component": "VDivider",
                                     },
                                     {
                                         "component": "VTable",
                                         "props": {
                                             "hover": True,
-                                            "style": "background-color: #1e1e1e; width: 100%; border-collapse: collapse;",
+                                            "class": "w-100",
                                         },
                                         "content": [
                                             header_row,
