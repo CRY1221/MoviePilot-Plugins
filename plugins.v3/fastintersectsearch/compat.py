@@ -12,6 +12,7 @@ from .subscription import make_owned_task, make_advance_sources
 from .presentation import make_title_stream
 from .streaming import ParsePool, make_page_events
 from .names import make_prepare_params
+from .recognition import make_meta, make_same_work, make_scope, make_stage
 
 
 def require(target, name, parameters, kind="sync"):
@@ -36,6 +37,8 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
     from app.chain.search import title
     from app.chain.search.title import SearchTitleOwner
     from app.chain.search.result import SearchResultOwner
+    from app.chain.search import result
+    from app.domain import metainfo
     from app.chain.subscribe.searchtask import SubscriptionSearchTaskRunner
     from app.application.torrent.download import TorrentHelper
     from app.sdk.plugin import PluginManager
@@ -59,6 +62,15 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
     asynchronous = require(SearchChain, "async_search_site_torrents", "self site keyword mtype page", "async")
     read = require(manual, "_read_pages", "manual keys page", "generator")
     page_events = require(manual, "_page_events", "manual params", "generator")
+    torrent_meta = require(result, "_torrent_meta", "torrent custom_words mediainfo")
+    same_work = require(result, "_same_work_matched", "torrent torrent_meta mediainfo cache")
+    filter_results = require(result, "_filter_torrents", "owner torrents mediainfo rule_groups filter_params progress diagnostics")
+    match_results = require(result, "_match_torrents", "torrents mediainfo season_episodes custom_words progress include_candidates diagnostics")
+
+    def parse_configuration():
+        # MP clears/rebuilds these options when parsing settings change. Include
+        # the current accelerator identity for fallback/reload transitions.
+        return (metainfo._rust_parse_options()["_cache_key"], id(metainfo.get_metainfo_accelerator()))
     run = require(execution.SearchExecutionOwner, "run", "owner plan media_chain")
     events = require(execution.SearchExecutionOwner, "events", "owner plan media_chain streaming", "generator")
     delay = require(execution, "_keyword_delay", "owner search_count")
@@ -95,9 +107,13 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
         (SearchChain, "search_site_torrents", make_site_sync(sync, SHARED_GATE, enabled, minimum_interval)),
         (SearchChain, "async_search_site_torrents", make_site_async(asynchronous, SHARED_GATE, enabled, minimum_interval)),
         (manual, "_read_pages", make_read_pages(read, manual._offload, enabled, max_pages)),
-        (manual, "_page_events", make_page_events(page_events, streaming_enabled, parse_pool)),
-        (execution.SearchExecutionOwner, "run", staticmethod(make_execution_run(run, enabled, no_plugin_sources))),
-        (execution.SearchExecutionOwner, "events", staticmethod(make_execution_events(events, enabled, no_plugin_sources))),
+        (result, "_torrent_meta", make_meta(torrent_meta, enabled, parse_configuration)),
+        (result, "_same_work_matched", make_same_work(same_work, enabled, result._disambiguation_key, parse_configuration)),
+        (result, "_filter_torrents", make_stage(filter_results, enabled, "filter")),
+        (result, "_match_torrents", make_stage(match_results, enabled, "match")),
+        (manual, "_page_events", make_scope(make_page_events(page_events, streaming_enabled, parse_pool), enabled, is_music, generator=True)),
+        (execution.SearchExecutionOwner, "run", staticmethod(make_scope(make_execution_run(run, enabled, no_plugin_sources), enabled, is_music))),
+        (execution.SearchExecutionOwner, "events", staticmethod(make_scope(make_execution_events(events, enabled, no_plugin_sources), enabled, is_music, generator=True))),
         (execution, "_keyword_delay", make_keyword_delay(delay, enabled)),
         (SearchPaginationOwner, "_get_search_resource_pages",
          staticmethod(make_resource_pages(resource_pages, enabled, max_pages))),

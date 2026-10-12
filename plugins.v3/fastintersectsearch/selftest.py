@@ -35,9 +35,12 @@ async def run_search(media_id, mtype=None, media_source="themoviedb"):
     marks, state = [], {"appends": 0, "candidates": 0, "results": 0, "sources": 0}
     complete, failed, source_facts = False, False, []
     first_matched = None
+    recognition_cache = None
     async with aclosing(chain.search_page_events(params=params)) as events:
         async for event in events:
             kind = event.get("type")
+            if "recognition_cache" in event:
+                recognition_cache = event["recognition_cache"]
             if "candidate_items" in event:
                 state["candidates"] = event["candidate_items"]
             if "sources" in event:
@@ -59,4 +62,5 @@ async def run_search(media_id, mtype=None, media_source="themoviedb"):
                 complete = complete or kind == "done"
     return {"media_id": str(media_id), "elapsed": round(time.monotonic() - started, 2),
             "status": "failed" if failed else "complete" if complete else "incomplete",
-            "first_matched": first_matched, "source_facts": source_facts, "marks": marks, **state}
+            "first_matched": first_matched, "source_facts": source_facts, "marks": marks,
+            "recognition_cache": recognition_cache, **state}

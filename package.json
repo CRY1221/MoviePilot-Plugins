@@ -2,7 +2,7 @@
   "FastIntersectSearch": {
     "name": "极速搜索",
     "description": "跨站并发、同站默认 3 秒（从上次请求结束起算），覆盖网页、通知渠道、智能助手和新订阅首搜；过滤、排序与下载决策沿用 MP。",
-    "version": "3.5.2",
+    "version": "3.6.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png",
     "author": "CRY1221",
     "level": 1,
@@ -10,6 +10,7 @@
     "v2": true,
     "system_version": ">=3.1.4",
     "history": {
+      "v3.6.0": "新增搜索内解析和原生消歧计算缓存，保留候选与原生规则；增加阶段耗时及缓存命中统计。",
       "v3.5.2": "首页请求失败时停止该关键词翻页，避免多余请求和原生补页。",
       "v3.5.1": "提前推送过滤匹配结果，修复解析异常、音乐分流和分页事实；完善自检并移除 MCP 下载认证字段。",
       "v3.5.0": "新增自检接口 /selftest，可在进程内跑一次搜索并取回耗时与数量统计。",
