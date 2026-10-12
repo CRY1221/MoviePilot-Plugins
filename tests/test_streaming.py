@@ -332,3 +332,26 @@ def test_provider_warm_is_inert_when_disabled_music_or_unknown(monkeypatch):
         assert calls == []
     finally:
         pool.close()
+
+
+def test_provider_warm_matches_the_native_custom_words_conversion(monkeypatch):
+    """原生 _parse_result 往下传的是 `custom_words or []`；预热必须照做，否则键对不上。"""
+    seen = []
+    module = ModuleType("app.chain.search.result")
+    module._torrent_meta = lambda torrent, custom_words, mediainfo: seen.append(custom_words)
+    monkeypatch.setitem(sys.modules, "app.chain.search", ModuleType("app.chain.search"))
+    monkeypatch.setitem(sys.modules, "app.chain.search.result", module)
+
+    pool = ParsePool(workers=1)
+    try:
+        for plan_words, expected in ((None, []), ([], []), (["兰香"], ["兰香"])):
+            del seen[:]
+            scoped = under_plan(site_batches(delays=(0,)), pool, NS(params={"mediainfo": NS(type="电影")}))
+
+            async def drain(plan_words=plan_words):
+                return [event async for event in scoped(None, NS(custom_words=plan_words), None, True)]
+
+            assert len(asyncio.run(drain())) == 1
+            assert seen == [expected], f"plan.custom_words={plan_words!r}"
+    finally:
+        pool.close()

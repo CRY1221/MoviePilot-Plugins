@@ -108,7 +108,7 @@ def warm_meta(torrents, custom_words, mediainfo):
 
     The custom words must be the very ones the native call will use; a key that
     differs by even one field makes this pure duplicated work, so the caller
-    passes the plan's own value rather than a guess.
+    reproduces the native conversion instead of passing the raw plan value.
     """
     from app.chain.search import result
     for torrent in torrents:
@@ -147,7 +147,10 @@ def make_provider_warm(original, enabled, pool):
             async for event in original(owner, step, streaming):
                 yield event
             return
-        custom_words = plan.custom_words
+        # SearchResultOwner._parse_result passes `custom_words or []` down to the
+        # match stage, so the cache key holds [] — never None — for the common
+        # case. Reusing the plan's raw value here meant every warmed entry missed.
+        custom_words = plan.custom_words or []
         pending = []
         try:
             async for event in original(owner, step, streaming):
