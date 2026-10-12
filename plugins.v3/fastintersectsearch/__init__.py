@@ -8,7 +8,7 @@ from app.log import logger
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
     plugin_desc = "跨站并发、同站默认 5 秒；过滤、排序和订阅下载沿用 MP。"
-    plugin_version = "3.0.0"
+    plugin_version = "3.1.0"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -39,12 +39,12 @@ class FastIntersectSearch(_PluginBase):
             return
         try:
             # Old 3-second configs are deliberately migrated to the agreed minimum.
-            interval = float(config.get("site_sleep_seconds", 5))
+            interval = float(config.get("site_sleep_seconds", 3))
             if not math.isfinite(interval):
                 raise ValueError("站点间隔必须是有限数字")
             from .compat import install
             self._hooks = install(self.get_state, lambda: self.get_state() and self._subscription,
-                                  max(5.0, interval),
+                                  max(1.0, interval),
                                   lambda: self.get_state() and self._streaming)
             self._enabled = True
             type(self)._instance = self
@@ -70,11 +70,11 @@ class FastIntersectSearch(_PluginBase):
         return [{"component": "VForm", "content": [
             {"component": "VSwitch", "props": {"model": "enabled", "label": "启用极速搜索"}},
             {"component": "VSwitch", "props": {"model": "accelerate_new_subscribe", "label": "加速新订阅首次搜索"}},
-            {"component": "VTextField", "props": {"model": "site_sleep_seconds", "label": "同站请求间隔（秒）", "type": "number", "min": 5}},
+            {"component": "VTextField", "props": {"model": "site_sleep_seconds", "label": "同站请求间隔（秒，从上次请求结束算起）", "type": "number", "min": 1}},
             {"component": "VSwitch", "props": {"model": "streaming_pipeline", "label": "边抓边洗（结果解析与抓取重叠）"}},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal"}, "text":
              "各站独立并发；解析与抓取重叠以缩短收尾等待。过滤、匹配、排序与下载决策仍由 MP 执行；保留 MP 更严格的站点与订阅限制。旧版双语、搜索超时、全集参数不再单独生效。"},
-        ]}], {"enabled": False, "accelerate_new_subscribe": True, "site_sleep_seconds": 5,
+        ]}], {"enabled": False, "accelerate_new_subscribe": True, "site_sleep_seconds": 3,
               "streaming_pipeline": True}
 
     def get_page(self):

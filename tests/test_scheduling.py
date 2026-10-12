@@ -184,6 +184,35 @@ def test_event_scope_reset_before_yield_across_tasks():
     asyncio.run(scenario())
 
 
+def test_interval_counts_from_previous_request_end():
+    now = [0.0]
+    gate = SiteRequestGate(interval=3.0, clock=lambda: now[0], poll_interval=0)
+    state, first = gate.enqueue({"id": 1})
+    assert gate.claim(state, first, 3.0)      # starts at t=0
+    now[0] = 10.0                              # the request itself took 10 seconds
+    gate.release(state, first)
+    _, second = gate.enqueue({"id": 1})
+    now[0] = 12.9
+    assert not gate.claim(state, second, 3.0)  # only 2.9s since it *finished*
+    now[0] = 13.0
+    assert gate.claim(state, second, 3.0)      # 3s after it finished
+    gate.release(state, second)
+
+
+def test_sync_wrapper_waits_after_a_slow_request_finishes():
+    gate = SiteRequestGate(interval=.05, poll_interval=.001)
+    stamps = []
+    def transport(owner, site, keyword, mtype=None, page=0):
+        stamps.append((keyword, time.monotonic()))
+        if keyword == "slow":
+            time.sleep(.1)
+        return keyword
+    call = make_site_sync(transport, gate, lambda: True)
+    call(None, {"id": 1}, "slow")
+    call(None, {"id": 1}, "fast")
+    assert stamps[1][1] - stamps[0][1] >= .15  # 0.1s request + 0.05s interval
+
+
 def test_native_minimum_survives_budget_reservation_delay_and_next_manual_call():
     now = [0.0]
     gate = SiteRequestGate(clock=lambda: now[0])

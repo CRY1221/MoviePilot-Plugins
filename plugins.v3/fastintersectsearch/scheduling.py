@@ -17,8 +17,12 @@ def is_music(value):
 
 
 class SiteRequestGate:
-    """Process-wide sync/async FIFO, measuring spacing between request starts."""
-    def __init__(self, interval=5.0, clock=time.monotonic, poll_interval=.02):
+    """Process-wide sync/async FIFO for one site.
+
+    The interval is measured from the end of the previous request on that site,
+    matching the old plugin's behaviour: request -> wait -> next request.
+    """
+    def __init__(self, interval=3.0, clock=time.monotonic, poll_interval=.02):
         self.interval = interval
         self.clock = clock
         self.poll_interval = poll_interval
@@ -39,7 +43,7 @@ class SiteRequestGate:
             if (state["active"] is None and state["queue"][0] is ticket
                     and (state["last"] is None or self.clock() - state["last"] >= max(interval, state["interval"]))):
                 state["queue"].popleft()
-                state["active"], state["last"] = ticket, self.clock()
+                state["active"] = ticket
                 state["interval"] = interval
                 return True
         return False
@@ -48,6 +52,8 @@ class SiteRequestGate:
         with self.lock:
             if state["active"] is ticket:
                 state["active"] = None
+                # The interval counts from the moment the last request finished.
+                state["last"] = self.clock()
             elif ticket in state["queue"]:
                 state["queue"].remove(ticket)
 
