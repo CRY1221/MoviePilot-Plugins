@@ -8,7 +8,7 @@ from app.sdk.logging import logger
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
     plugin_desc = "跨站并发、同站默认 3 秒；过滤、排序和订阅下载沿用 MP。"
-    plugin_version = "3.6.9"
+    plugin_version = "3.6.10"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30

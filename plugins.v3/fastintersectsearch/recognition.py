@@ -83,6 +83,17 @@ class SearchReuse:
             f"计算={self.parse.seconds:.3f}s；"
             f"消歧 命中={self.identity.hits} 新算={self.identity.misses} "
             f"计算={self.identity.seconds:.3f}s；阶段累计={self.stages}")
+        # 原生探针写进日志：区分真的走了 Rust 还是回退到 Python，并给出各自的线程墙钟/CPU。
+        # 只看总耗时无法判断，必须按调用点分开看。
+        with self.lock:
+            probes = {name: dict(values) for name, values in self.probes.items()}
+        if not probes:
+            logger.info("极速搜索原生探针：无调用")
+            return
+        logger.info("极速搜索原生探针：" + "；".join(
+            f"{name} 次数={item['calls']} 墙钟={item['wall_seconds']:.3f}s "
+            f"CPU={item['thread_cpu_seconds']:.3f}s None={item['none_results']} "
+            f"异常={item['errors']}" for name, item in sorted(probes.items())))
 
     def snapshot(self):
         """Counters and summed worker wall time, not exclusive search latency."""
