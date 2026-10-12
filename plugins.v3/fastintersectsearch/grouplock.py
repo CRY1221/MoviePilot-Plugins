@@ -123,23 +123,57 @@ def used_team_of(source):
     return None
 
 
-def make_group_lock(enabled, sort_torrents, parse_subscribe, tv_type, history_lookup=used_team_of):
+class _Silent:
+    """Log target used when the caller injects none."""
+
+    @staticmethod
+    def debug(*_args, **_kwargs):
+        pass
+
+    @staticmethod
+    def info(*_args, **_kwargs):
+        pass
+
+    @staticmethod
+    def warning(*_args, **_kwargs):
+        pass
+
+
+def make_group_lock(enabled, sort_torrents, parse_subscribe, tv_type,
+                    history_lookup=used_team_of, log=None):
     """Build the ``ResourceSelection`` handler body.
 
     Returns ``None`` whenever the plugin is off, the batch is not a subscription
-    download, or the candidates need no change.
+    download, or the candidates need no change. Every exit says why in the log,
+    because otherwise a silent no-op is indistinguishable from a dead handler.
     """
+    log = log or _Silent()
+
     def apply(origin, contexts):
         if not enabled() or not contexts:
             return None
         source = parse_subscribe(origin)
-        if not source or source.get("type") != tv_type:
+        if not source:
+            log.debug("一季同组：不是订阅下载，不干预")
+            return None
+        if source.get("type") != tv_type:
+            log.debug("一季同组：不是电视剧，不干预")
             return None
         try:
             used_team = history_lookup(source)
-        except Exception:
+        except Exception as error:
             # 查不到已用的组就不猜，交给 MP 原样处理。
+            log.warning(f"一季同组：读取已用制作组失败，本轮不干预（{error}）")
             return None
-        return narrow(contexts, choose_team(contexts, used_team, sort_torrents))
+        team = choose_team(contexts, used_team, sort_torrents)
+        if not team:
+            log.debug("一季同组：这一轮认不出制作组，不干预")
+            return None
+        narrowed = narrow(contexts, team)
+        if narrowed is None:
+            log.debug(f"一季同组：{team} 无需收敛（候选 {len(contexts)} 条）")
+            return None
+        log.info(f"一季同组：锁定 {team}，候选 {len(contexts)} → {len(narrowed)}")
+        return narrowed
 
     return apply

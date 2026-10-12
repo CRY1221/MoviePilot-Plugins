@@ -10,7 +10,7 @@ from app.schemas.types import ChainEventType
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
     plugin_desc = "跨站并发、同站默认 3 秒；规则与排序沿用 MP，订阅按集下载可收敛到同一制作组。"
-    plugin_version = "3.6.16"
+    plugin_version = "3.6.17"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -66,7 +66,7 @@ class FastIntersectSearch(_PluginBase):
             self._group_lock_apply = make_group_lock(
                 lambda: self.get_state() and self._group_lock,
                 TorrentHelper.sort_torrents, SubscribeChain.parse_subscribe_source_keyword,
-                MediaType.TV.value)
+                MediaType.TV.value, log=logger)
             self._hooks = install(self.get_state, lambda: self.get_state() and self._subscription,
                                   max(1.0, interval),
                                   lambda: self.get_state() and self._streaming,

@@ -113,6 +113,23 @@ def test_handler_declines_when_the_history_lookup_fails(monkeypatch):
     assert apply({"type": "电视剧"}, [candidate("HDSky"), candidate("MTeam")]) is None
 
 
+def test_handler_says_why_in_the_log_either_way():
+    lines = []
+    log = NS(debug=lines.append, info=lines.append, warning=lines.append)
+
+    def parse(origin):
+        return origin if isinstance(origin, dict) else None
+
+    apply = make_group_lock(lambda: True, order, parse, "电视剧",
+                            history_lookup=lambda source: "HDSky", log=log)
+    batch = [candidate("HDSky"), candidate("MTeam")]
+    assert apply({"type": "电视剧"}, batch) == batch[:1]
+    assert lines == ["一季同组：锁定 HDSky，候选 2 → 1"]
+    lines.clear()
+    assert apply({"type": "电影"}, batch) is None
+    assert lines == ["一季同组：不是电视剧，不干预"]
+
+
 def host_module(monkeypatch, name):
     result = ModuleType(name)
     result.__path__ = []
