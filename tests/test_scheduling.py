@@ -305,7 +305,8 @@ def test_page_cap_and_duplicates_are_respected():
     wrapper = make_read_pages(lambda *_: None, offload, lambda: True, lambda: 2)
     result = asyncio.run(collect(wrapper, manual, ["1:alpha"]))
     assert manual.calls == [0, 1]
-    assert [item.title for item in result[0][2]] == ["a", "b"]
+    # 插件不再自己按站点+标题+描述去重，重复项交给 MP 的规则链与 _remove_duplicate。
+    assert [item.title for item in result[0][2]] == ["a", "a", "b"]
 
 
 def test_non_pageable_site_and_errors_stop_the_walk():

@@ -8,7 +8,7 @@ from app.log import logger
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
     plugin_desc = "跨站并发、同站默认 5 秒；过滤、排序和订阅下载沿用 MP。"
-    plugin_version = "3.3.0"
+    plugin_version = "3.4.0"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -23,6 +23,7 @@ class FastIntersectSearch(_PluginBase):
         self._streaming = True
         self._max_pages = 10
         self._names = True
+        self._interval = 3.0
         self._status = "未启用"
 
     @classmethod
@@ -49,6 +50,7 @@ class FastIntersectSearch(_PluginBase):
             interval = float(config.get("site_sleep_seconds", 3))
             if not math.isfinite(interval):
                 raise ValueError("站点间隔必须是有限数字")
+            self._interval = max(1.0, interval)
             from .compat import install
             self._hooks = install(self.get_state, lambda: self.get_state() and self._subscription,
                                   max(1.0, interval),
@@ -89,17 +91,28 @@ class FastIntersectSearch(_PluginBase):
               "streaming_pipeline": True, "max_pages_per_site": 10, "bilingual_names": True}
 
     def get_page(self):
+        """插件详情页：沿用旧版黑曜石玻璃拟态耗时大盘，数据取自本进程实时统计。"""
+        from .page import render
         from .scheduling import SHARED_GATE
-        return [
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal"}, "text": self._status},
-            {"component": "VCardTitle", "text": "搜索耗时总览"},
-            {"component": "VCardText", "text": "当前进程最近 72 小时、最多 5000 次请求样本。排队与实际调用耗时分开统计；异常数包含取消，不代表站点返回的业务错误总数。"},
-            {"component": "VDataTable", "props": {"headers": [
-                {"title": title, "key": key} for title, key in [
-                    ("站点", "site"), ("请求数", "requests"), ("上次调用（秒）", "last"),
-                    ("平均调用（秒）", "mean"), ("平均排队（秒）", "wait"), ("异常/取消", "errors")]],
-                "items": SHARED_GATE.snapshot(), "items-per-page": 20}},
-        ]
+        summary = (f"同站间隔 {self._interval:.0f} 秒（从上次请求结束起算）｜每站最多 {self._max_pages} 页｜"
+                   f"边抓边洗 {'开' if self._streaming else '关'}｜中英搜索 {'开' if self._names else '关'}｜"
+                   f"新订阅首搜加速 {'开' if self._subscription else '关'}")
+        return render(self._status, SHARED_GATE.snapshot(), self._site_icon_map(), summary)
+
+    def _site_icon_map(self):
+        """站点图标（Base64/URL），与旧版一致，取自站点图标表。"""
+        icons = {}
+        try:
+            from app.db.models.siteicon import SiteIcon
+            from app.db import get_db
+            for item in next(get_db()).query(SiteIcon).all():
+                if item.name and item.base64:
+                    icons[item.name] = item.base64
+                elif item.name and item.url:
+                    icons[item.name] = item.url
+        except Exception:
+            pass
+        return icons
 
     def get_agent_tools(self):
         from .tools import FastIntersectSearchTool
