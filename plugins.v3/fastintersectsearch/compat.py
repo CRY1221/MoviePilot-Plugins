@@ -1,0 +1,99 @@
+"""All private MP 3.1.4 dependencies and transactional installation live here."""
+import inspect
+from dataclasses import replace
+
+from .hooks import Hooks
+from .scheduling import (
+    SHARED_GATE, is_music, make_site_sync, make_site_async, make_read_pages,
+    make_execution_run, make_execution_events, make_keyword_delay,
+)
+from .subscription import make_owned_task, make_advance_sources
+from .presentation import make_title_stream
+
+
+def require(target, name, parameters, kind="sync"):
+    function = getattr(target, name)
+    if tuple(inspect.signature(function).parameters) != tuple(parameters.split()):
+        raise RuntimeError(f"MP 接口签名不兼容：{name}")
+    actual = "generator" if inspect.isasyncgenfunction(function) else "async" if inspect.iscoroutinefunction(function) else "sync"
+    if actual != kind or not function.__module__.startswith("app.") or hasattr(function, "__wrapped__"):
+        raise RuntimeError(f"MP 接口已被替换或类型不兼容：{name}，请检查其他插件并正常重启")
+    return function
+
+
+def install(enabled, subscription_enabled, interval):
+    from app.chain.search.facade import SearchChain
+    from app.chain.search import manual, execution
+    from app.chain.search.scan import SearchScan, SearchSources, AUTOMATIC_REQUEST_INTERVAL
+    from app.application.subscription.sitebudget import SubscriptionSiteBudget
+    from app.chain.search import title
+    from app.chain.search.title import SearchTitleOwner
+    from app.chain.subscribe.searchtask import SubscriptionSearchTaskRunner
+    from app.application.torrent.download import TorrentHelper
+    from app.sdk.plugin import PluginManager
+
+    def no_plugin_sources():
+        try:
+            modules = PluginManager().get_plugin_modules()
+            return isinstance(modules, dict) and all(
+                isinstance(methods, dict) and not ({"search_torrents", "async_search_torrents"} & methods.keys())
+                for methods in modules.values())
+        except Exception:
+            return False
+
+    def minimum_interval(owner):
+        # Native budget claims precede the gate wait. Also enforce the native
+        # minimum at the real request start, not just at budget reservation time.
+        return AUTOMATIC_REQUEST_INTERVAL if isinstance(
+            getattr(owner, "_subscription_site_budget", None), SubscriptionSiteBudget) else 0
+
+    sync = require(SearchChain, "search_site_torrents", "self site keyword mtype page")
+    asynchronous = require(SearchChain, "async_search_site_torrents", "self site keyword mtype page", "async")
+    read = require(manual, "_read_pages", "manual keys page", "generator")
+    run = require(execution.SearchExecutionOwner, "run", "owner plan media_chain")
+    events = require(execution.SearchExecutionOwner, "events", "owner plan media_chain streaming", "generator")
+    delay = require(execution, "_keyword_delay", "owner search_count")
+    advance = require(SearchScan, "_advance_sources", "self keys submit started")
+    require(SearchScan, "run", "self submit")
+    require(SearchScan, "step", "self key")
+    require(SearchSources, "fetch", "self key page budget")
+    owned = require(SubscriptionSearchTaskRunner, "_execute_owned_task",
+                    "self subscribe task_id lease_token execution_lease cancelled")
+    resolve = require(SearchTitleOwner, "_resolve_title_request", "self request")
+    title_stream = require(SearchTitleOwner, "async_search_by_title_stream",
+                           "self title page sites cache_local mtype rule_groups", "generator")
+    require(SearchChain, "async_search_by_id_stream",
+            "self media_source media_id mtype area season sites cache_local music_type include_candidates", "generator")
+    require(SearchChain, "async_search_by_title_stream",
+            "self title page sites cache_local mtype rule_groups", "generator")
+
+    def sorted_title(owner, request):
+        result = resolve(owner, request)
+        if enabled() and not is_music(request.mtype):
+            return replace(result, contexts=TorrentHelper.sort_torrents(result.contexts))
+        return result
+
+    patches = [
+        (SearchChain, "search_site_torrents", make_site_sync(sync, SHARED_GATE, enabled, minimum_interval)),
+        (SearchChain, "async_search_site_torrents", make_site_async(asynchronous, SHARED_GATE, enabled, minimum_interval)),
+        (manual, "_read_pages", make_read_pages(read, manual._offload, enabled)),
+        (execution.SearchExecutionOwner, "run", staticmethod(make_execution_run(run, enabled, no_plugin_sources))),
+        (execution.SearchExecutionOwner, "events", staticmethod(make_execution_events(events, enabled, no_plugin_sources))),
+        (execution, "_keyword_delay", make_keyword_delay(delay, enabled)),
+        (SearchScan, "_advance_sources", make_advance_sources(advance, subscription_enabled)),
+        (SubscriptionSearchTaskRunner, "_execute_owned_task", make_owned_task(owned, subscription_enabled)),
+        (SearchTitleOwner, "_resolve_title_request", sorted_title),
+        (SearchTitleOwner, "async_search_by_title_stream", make_title_stream(
+            title_stream, enabled, title._build_title_search_params, title._build_title_contexts,
+            manual._offload, TorrentHelper.sort_torrents,
+            lambda: title.get_configured_system_config().get(title.SystemConfigKey.SearchFilterRuleGroups) or [])),
+    ]
+    hooks = Hooks()
+    try:
+        SHARED_GATE.interval = interval
+        for target, name, wrapper in patches:
+            hooks.install(target, name, wrapper)
+    except Exception:
+        hooks.close()
+        raise
+    return hooks
