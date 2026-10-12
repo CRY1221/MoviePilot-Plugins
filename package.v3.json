@@ -2,12 +2,13 @@
   "FastIntersectSearch": {
     "name": "极速搜索",
     "description": "跨站并发、同站默认 3 秒，覆盖网页、通知渠道、智能助手和新订阅首搜；规则、排序及下载决策沿用 MP。",
-    "version": "3.6.1",
+    "version": "3.6.2",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png",
     "author": "CRY1221",
     "level": 1,
     "system_version": ">=3.1.4",
     "history": {
+      "v3.6.2": "诊断捕获原生 Rust 适配器回退原因；自检支持指定单站，减少排查请求量；不改变筛选规则。",
       "v3.6.1": "增加真实 Rust 过滤/解析与 Python 回退路径计数、规则组读取和进度更新耗时；区分缓存复制、等待和原生计算时间，不改变规则及搜索结果。",
       "v3.6.0": "新增单次搜索内资源解析与原生身份消歧计算缓存；保留所有候选、原生规则及下载决策；自检返回缓存命中与过滤/匹配阶段累计耗时。",
       "v3.5.2": "来源首页请求失败时停止该关键词翻页，避免失败后继续请求下一页和触发原生补页；保留失败事实。",

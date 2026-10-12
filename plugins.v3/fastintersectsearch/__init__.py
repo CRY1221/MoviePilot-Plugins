@@ -8,7 +8,7 @@ from app.sdk.logging import logger
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
     plugin_desc = "跨站并发、同站默认 3 秒；过滤、排序和订阅下载沿用 MP。"
-    plugin_version = "3.6.1"
+    plugin_version = "3.6.2"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -130,12 +130,12 @@ class FastIntersectSearch(_PluginBase):
         }]
 
     async def api_selftest(self, media_id: str = "758891", mtype: str = "电影",
-                           media_source: str = "themoviedb"):
+                           media_source: str = "themoviedb", site_id: int | None = None):
         """自检：跑一次搜索，并给出这次搜索新增的站点请求统计。"""
         from . import selftest
         from .scheduling import SHARED_GATE
         before = {item["site"]: item["requests"] for item in SHARED_GATE.snapshot()}
-        result = await selftest.run_search(media_id=media_id, mtype=mtype, media_source=media_source)
+        result = await selftest.run_search(media_id=media_id, mtype=mtype, media_source=media_source, site_id=site_id)
         result["sites"] = [
             {**item, "requests": item["requests"] - before.get(item["site"], 0)}
             for item in SHARED_GATE.snapshot()

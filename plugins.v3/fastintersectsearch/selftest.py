@@ -24,7 +24,7 @@ def resolve_mtype(value):
     return None
 
 
-async def run_search(media_id, mtype=None, media_source="themoviedb"):
+async def run_search(media_id, mtype=None, media_source="themoviedb", site_id=None):
     """Drive one Web page search and collect timing, counts and stage marks."""
     from app.chain.search.facade import SearchChain
     from app.adapters.system import rust
@@ -32,6 +32,8 @@ async def run_search(media_id, mtype=None, media_source="themoviedb"):
     chain = SearchChain()
     params = {"media_source": media_source, "media_id": str(media_id),
               "mtype": resolve_mtype(mtype), "page": 0}
+    if site_id is not None:
+        params["sites"] = [site_id]
     started = time.monotonic()
     marks, state = [], {"appends": 0, "candidates": 0, "results": 0, "sources": 0}
     complete, failed, source_facts = False, False, []

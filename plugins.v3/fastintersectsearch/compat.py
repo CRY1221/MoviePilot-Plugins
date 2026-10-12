@@ -12,7 +12,7 @@ from .subscription import make_owned_task, make_advance_sources
 from .presentation import make_title_stream
 from .streaming import ParsePool, make_page_events
 from .names import make_prepare_params
-from .recognition import make_meta, make_same_work, make_scope, make_stage, make_probe
+from .recognition import make_meta, make_same_work, make_scope, make_stage, make_probe, make_native_error
 
 
 def require(target, name, parameters, kind="sync"):
@@ -75,6 +75,7 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
     project_meta = require(metainfo, "_meta_from_rust", "parsed")
     rule_groups = require(RuleHelper, "get_rule_group_by_media", "self media group_names")
     progress_update = require(ProgressHelper, "update", "self value text data")
+    native_error = require(rust, "_raise_non_rust_panic", "err")
 
     def parse_configuration():
         # MP clears/rebuilds these options when parsing settings change. Include
@@ -126,6 +127,7 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
         (metainfo, "_meta_from_rust", make_probe(project_meta, enabled, "rust_projection")),
         (RuleHelper, "get_rule_group_by_media", make_probe(rule_groups, enabled, "rule_group_lookup")),
         (ProgressHelper, "update", make_probe(progress_update, enabled, "progress_update")),
+        (rust, "_raise_non_rust_panic", make_native_error(native_error, enabled)),
         (manual, "_page_events", make_scope(make_page_events(page_events, streaming_enabled, parse_pool), enabled, is_music, generator=True)),
         (execution.SearchExecutionOwner, "run", staticmethod(make_scope(make_execution_run(run, enabled, no_plugin_sources), enabled, is_music))),
         (execution.SearchExecutionOwner, "events", staticmethod(make_scope(make_execution_events(events, enabled, no_plugin_sources), enabled, is_music, generator=True))),

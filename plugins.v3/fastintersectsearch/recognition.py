@@ -8,6 +8,7 @@ from contextvars import ContextVar
 from functools import wraps
 
 ACTIVE = ContextVar("fastsearch_recognition", default=None)
+PROBE = ContextVar("fastsearch_native_probe", default=None)
 
 
 class SearchCache:
@@ -71,6 +72,7 @@ class SearchReuse:
         self.started = time.monotonic()
         self.stages = {}
         self.probes = {}
+        self.native_errors = []
         self.lock = threading.Lock()
 
     def report(self):
@@ -87,6 +89,7 @@ class SearchReuse:
         with self.lock:
             stages = dict(self.stages)
             probes = copy.deepcopy(self.probes)
+            native_errors = copy.deepcopy(self.native_errors)
         def counters(cache):
             return {"hits": cache.hits, "misses": cache.misses,
                     "compute_seconds": round(cache.seconds, 6),
@@ -94,7 +97,7 @@ class SearchReuse:
                     "copy_seconds": round(cache.copy_seconds, 6),
                     "wait_seconds": round(cache.wait_seconds, 6)}
         return {"parse": counters(self.parse), "identity": counters(self.identity),
-                "stage_totals": stages, "probes": probes}
+                "stage_totals": stages, "probes": probes, "native_errors": native_errors}
 
     def record(self, name, wall, cpu, none=False, error=False):
         with self.lock:
@@ -116,14 +119,30 @@ def make_probe(original, enabled, name):
         if scope is None or not enabled():
             return original(*args, **kwargs)
         wall, cpu = time.monotonic(), time.thread_time()
+        token = PROBE.set(name)
         none, error = False, True
         try:
             result = original(*args, **kwargs)
             none, error = result is None, False
             return result
         finally:
+            PROBE.reset(token)
             scope.record(name, time.monotonic() - wall, time.thread_time() - cpu, none, error)
     return probe
+
+
+def make_native_error(original, enabled):
+    """Observe exceptions caught by MP's Rust adapter, without changing fallback."""
+    @wraps(original)
+    def error(err):
+        scope = ACTIVE.get()
+        if scope is not None and enabled():
+            detail = {"operation": PROBE.get(), "type": type(err).__name__, "message": str(err)[:600]}
+            with scope.lock:
+                if len(scope.native_errors) < 20 and detail not in scope.native_errors:
+                    scope.native_errors.append(detail)
+        return original(err)
+    return error
 
 
 def make_stage(original, enabled, name):
