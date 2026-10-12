@@ -15,6 +15,11 @@ class Patch:
 class Hooks:
     def __init__(self):
         self.patches = []
+        self.closers = []
+
+    def add_closer(self, closer):
+        """Register an extra teardown step run after the wrappers are restored."""
+        self.closers.append(closer)
 
     def install(self, target, name, replacement):
         original = inspect.getattr_static(target, name)
@@ -30,3 +35,9 @@ class Hooks:
                 else:
                     delattr(patch.target, patch.name)
         self.patches.clear()
+        for closer in reversed(self.closers):
+            try:
+                closer()
+            except Exception:
+                pass
+        self.closers.clear()

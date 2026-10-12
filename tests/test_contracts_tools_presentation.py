@@ -39,7 +39,7 @@ def test_all_installed_hook_signatures_match_pinned_native_source():
             actual = "generator" if any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(node)) else "async"
         assert actual == expected, name
         checked.append(name)
-    assert len(checked) == 15
+    assert len(checked) == 16
 
 
 def test_compatibility_rejects_unknown_or_wrapped_hooks():

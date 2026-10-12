@@ -20,6 +20,7 @@ class FastIntersectSearch(_PluginBase):
         self._hooks = None
         self._enabled = False
         self._subscription = True
+        self._streaming = True
         self._status = "未启用"
 
     @classmethod
@@ -33,6 +34,7 @@ class FastIntersectSearch(_PluginBase):
         self.stop_service()
         config = config or {}
         self._subscription = bool(config.get("accelerate_new_subscribe", True))
+        self._streaming = bool(config.get("streaming_pipeline", True))
         if not config.get("enabled", False):
             return
         try:
@@ -42,7 +44,8 @@ class FastIntersectSearch(_PluginBase):
                 raise ValueError("站点间隔必须是有限数字")
             from .compat import install
             self._hooks = install(self.get_state, lambda: self.get_state() and self._subscription,
-                                  max(5.0, interval))
+                                  max(5.0, interval),
+                                  lambda: self.get_state() and self._streaming)
             self._enabled = True
             type(self)._instance = self
             self._status = "已启用（本地调度；原生规则与下载决策）"
@@ -68,9 +71,11 @@ class FastIntersectSearch(_PluginBase):
             {"component": "VSwitch", "props": {"model": "enabled", "label": "启用极速搜索"}},
             {"component": "VSwitch", "props": {"model": "accelerate_new_subscribe", "label": "加速新订阅首次搜索"}},
             {"component": "VTextField", "props": {"model": "site_sleep_seconds", "label": "同站请求间隔（秒）", "type": "number", "min": 5}},
+            {"component": "VSwitch", "props": {"model": "streaming_pipeline", "label": "边抓边洗（结果解析与抓取重叠）"}},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal"}, "text":
-             "各站独立并发；保留 MP 更严格的站点与订阅限制。关键词、分页范围、规则和下载由 MP 管理。旧版双语、搜索超时、全集参数不再单独生效。"},
-        ]}], {"enabled": False, "accelerate_new_subscribe": True, "site_sleep_seconds": 5}
+             "各站独立并发；解析与抓取重叠以缩短收尾等待。过滤、匹配、排序与下载决策仍由 MP 执行；保留 MP 更严格的站点与订阅限制。旧版双语、搜索超时、全集参数不再单独生效。"},
+        ]}], {"enabled": False, "accelerate_new_subscribe": True, "site_sleep_seconds": 5,
+              "streaming_pipeline": True}
 
     def get_page(self):
         from .scheduling import SHARED_GATE

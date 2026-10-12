@@ -9,6 +9,7 @@ from .scheduling import (
 )
 from .subscription import make_owned_task, make_advance_sources
 from .presentation import make_title_stream
+from .streaming import ParsePool, make_page_events
 
 
 def require(target, name, parameters, kind="sync"):
@@ -21,13 +22,15 @@ def require(target, name, parameters, kind="sync"):
     return function
 
 
-def install(enabled, subscription_enabled, interval):
+def install(enabled, subscription_enabled, interval, streaming_enabled=None):
+    streaming_enabled = streaming_enabled or enabled
     from app.chain.search.facade import SearchChain
     from app.chain.search import manual, execution
     from app.chain.search.scan import SearchScan, SearchSources, AUTOMATIC_REQUEST_INTERVAL
     from app.application.subscription.sitebudget import SubscriptionSiteBudget
     from app.chain.search import title
     from app.chain.search.title import SearchTitleOwner
+    from app.chain.search.result import SearchResultOwner
     from app.chain.subscribe.searchtask import SubscriptionSearchTaskRunner
     from app.application.torrent.download import TorrentHelper
     from app.sdk.plugin import PluginManager
@@ -50,6 +53,7 @@ def install(enabled, subscription_enabled, interval):
     sync = require(SearchChain, "search_site_torrents", "self site keyword mtype page")
     asynchronous = require(SearchChain, "async_search_site_torrents", "self site keyword mtype page", "async")
     read = require(manual, "_read_pages", "manual keys page", "generator")
+    page_events = require(manual, "_page_events", "manual params", "generator")
     run = require(execution.SearchExecutionOwner, "run", "owner plan media_chain")
     events = require(execution.SearchExecutionOwner, "events", "owner plan media_chain streaming", "generator")
     delay = require(execution, "_keyword_delay", "owner search_count")
@@ -73,10 +77,15 @@ def install(enabled, subscription_enabled, interval):
             return replace(result, contexts=TorrentHelper.sort_torrents(result.contexts))
         return result
 
+    # Parsing runs in its own pool so it overlaps site fetching instead of
+    # competing with it or waiting until the very end.
+    parse_pool = ParsePool(workers=4, sorter=TorrentHelper.sort_torrents,
+                           dedup=SearchResultOwner._remove_duplicate)
     patches = [
         (SearchChain, "search_site_torrents", make_site_sync(sync, SHARED_GATE, enabled, minimum_interval)),
         (SearchChain, "async_search_site_torrents", make_site_async(asynchronous, SHARED_GATE, enabled, minimum_interval)),
         (manual, "_read_pages", make_read_pages(read, manual._offload, enabled)),
+        (manual, "_page_events", make_page_events(page_events, streaming_enabled, parse_pool)),
         (execution.SearchExecutionOwner, "run", staticmethod(make_execution_run(run, enabled, no_plugin_sources))),
         (execution.SearchExecutionOwner, "events", staticmethod(make_execution_events(events, enabled, no_plugin_sources))),
         (execution, "_keyword_delay", make_keyword_delay(delay, enabled)),
@@ -89,6 +98,7 @@ def install(enabled, subscription_enabled, interval):
             lambda: title.get_configured_system_config().get(title.SystemConfigKey.SearchFilterRuleGroups) or [])),
     ]
     hooks = Hooks()
+    hooks.add_closer(parse_pool.close)
     try:
         SHARED_GATE.interval = interval
         for target, name, wrapper in patches:
