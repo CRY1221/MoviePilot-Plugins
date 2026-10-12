@@ -143,8 +143,16 @@ def make_page_events(original, enabled, pool):
                     pool.merge, [batch for key in manual.sources.queries
                                  for _, batch in sorted(batches_by_key.get(key, {}).items())])
                 if VALIDATION.get() is not None:
-                    baseline = await pool.run(manual.results, deepcopy(manual.torrents))
-                    VALIDATION.get().append({"kind": "final_merge", "candidates": len(manual.torrents),
+                    checks = VALIDATION.get()
+                    token = VALIDATION.set(None)
+                    try:
+                        # Each candidate was already compared against native
+                        # Python above. Compare the native whole-result pass
+                        # without doing that expensive comparison twice.
+                        baseline = await pool.run(manual.results, deepcopy(manual.torrents))
+                    finally:
+                        VALIDATION.reset(token)
+                    checks.append({"kind": "final_merge", "candidates": len(manual.torrents),
                                              "equivalent": [c.to_dict() for c in contexts] == [c.to_dict() for c in baseline],
                                              "incremental_results": len(contexts), "native_results": len(baseline)})
                 if contexts:

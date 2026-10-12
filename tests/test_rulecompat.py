@@ -3,6 +3,8 @@ import re
 
 from fastsearch.rulecompat import compatible_pattern, compatible_rules, make_filter
 from fastsearch.recognition import ACTIVE, SearchReuse
+from fastsearch.subscription import SUBSCRIPTION_SCOPE
+from types import SimpleNamespace as NS
 
 
 def test_literal_nested_bracket_preserves_complete_expression_and_matches():
@@ -45,3 +47,20 @@ def test_rules_are_not_mutated_and_native_fallback_keeps_original():
         assert received[-1][2] is rules
     finally:
         ACTIVE.reset(token)
+
+
+def test_new_subscription_uses_compatibility_but_music_stays_native():
+    rules = {"a": {"include": r"[a[]"}}
+    received = []
+    def native(*args):
+        received.append(args[2])
+        return []
+    wrapper = make_filter(native, lambda: True)
+    token = SUBSCRIPTION_SCOPE.set((object(),))
+    try:
+        wrapper([], [], rules, NS(type="电视剧"))
+        assert received[-1] == compatible_rules(rules)
+        wrapper([], [], rules, NS(type="音乐"))
+        assert received[-1] is rules
+    finally:
+        SUBSCRIPTION_SCOPE.reset(token)

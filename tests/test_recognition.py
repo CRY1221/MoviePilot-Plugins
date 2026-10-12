@@ -130,6 +130,16 @@ def test_scope_isolated_and_generator_does_not_leak(monkeypatch):
     assert len(reports) == 3
 
 
+def test_title_request_scope_and_music_type_are_respected(monkeypatch):
+    monkeypatch.setattr(SearchReuse, "report", lambda _: None)
+    def resolve(owner, request):
+        return ACTIVE.get()
+    wrapped = make_scope(resolve, lambda: True, lambda kind: kind == "音乐")
+    assert wrapped(None, NS(mtype="电影")) is not None
+    assert wrapped(None, NS(mtype="音乐")) is None
+    assert ACTIVE.get() is None
+
+
 def test_unchanged_native_operations_produce_equal_results(monkeypatch):
     """Exercise actual pinned MP functions, including rejection/None paths."""
     calls = []
