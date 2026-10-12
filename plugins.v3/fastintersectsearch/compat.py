@@ -11,7 +11,6 @@ from .scheduling import (
 from .subscription import make_owned_task, make_advance_sources
 from .presentation import make_title_stream
 from .streaming import ParsePool, make_page_events, make_dedup
-from .cassette import make_cassette
 from .names import make_prepare_params
 from .recognition import make_meta, make_same_work, make_scope, make_stage, make_probe, make_native_error
 from .rulecompat import make_filter
@@ -96,7 +95,7 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
     advance = require(SearchScan, "_advance_sources", "self keys submit started")
     require(SearchScan, "run", "self submit")
     require(SearchScan, "step", "self key")
-    source_fetch = require(SearchSources, "fetch", "self key page budget")
+    require(SearchSources, "fetch", "self key page budget")
     owned = require(SubscriptionSearchTaskRunner, "_execute_owned_task",
                     "self subscribe task_id lease_token execution_lease cancelled")
     resolve = require(SearchTitleOwner, "_resolve_title_request", "self request")
@@ -134,7 +133,6 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
         (rust, "_raise_non_rust_panic", make_native_error(native_error, enabled)),
         (SearchResultOwner, "_remove_duplicate", staticmethod(make_dedup(dedup))),
         (SearchChain, "_remove_duplicate", staticmethod(make_dedup(facade_dedup))),
-        (SearchSources, "fetch", make_cassette(source_fetch, enabled)),
         (manual, "_page_events", make_scope(make_page_events(page_events, streaming_enabled, parse_pool), enabled, is_music, generator=True)),
         (execution.SearchExecutionOwner, "run", staticmethod(make_scope(make_execution_run(run, enabled, no_plugin_sources), enabled, is_music))),
         (execution.SearchExecutionOwner, "events", staticmethod(make_scope(make_execution_events(events, enabled, no_plugin_sources), enabled, is_music, generator=True))),
