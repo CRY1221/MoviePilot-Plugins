@@ -12,7 +12,7 @@ from .subscription import make_owned_task, make_advance_sources
 from .presentation import make_title_stream
 from .streaming import ParsePool, make_page_events
 from .names import make_prepare_params
-from .recognition import make_meta, make_same_work, make_scope, make_stage
+from .recognition import make_meta, make_same_work, make_scope, make_stage, make_probe
 
 
 def require(target, name, parameters, kind="sync"):
@@ -39,6 +39,9 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
     from app.chain.search.result import SearchResultOwner
     from app.chain.search import result
     from app.domain import metainfo
+    from app.adapters.system import rust
+    from app.application.rules import RuleHelper
+    from app.runtime.progress import ProgressHelper
     from app.chain.subscribe.searchtask import SubscriptionSearchTaskRunner
     from app.application.torrent.download import TorrentHelper
     from app.sdk.plugin import PluginManager
@@ -66,6 +69,12 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
     same_work = require(result, "_same_work_matched", "torrent torrent_meta mediainfo cache")
     filter_results = require(result, "_filter_torrents", "owner torrents mediainfo rule_groups filter_params progress diagnostics")
     match_results = require(result, "_match_torrents", "torrents mediainfo season_episodes custom_words progress include_candidates diagnostics")
+    rust_filter = require(rust, "filter_torrents", "groups torrent_list rule_set mediainfo metainfo_options")
+    rust_parse = require(rust, "parse_metainfo", "title subtitle options")
+    python_parse = require(metainfo, "_build_python_meta_info", "title subtitle custom_words")
+    project_meta = require(metainfo, "_meta_from_rust", "parsed")
+    rule_groups = require(RuleHelper, "get_rule_group_by_media", "self media group_names")
+    progress_update = require(ProgressHelper, "update", "self value text data")
 
     def parse_configuration():
         # MP clears/rebuilds these options when parsing settings change. Include
@@ -111,6 +120,12 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
         (result, "_same_work_matched", make_same_work(same_work, enabled, result._disambiguation_key, parse_configuration)),
         (result, "_filter_torrents", make_stage(filter_results, enabled, "filter")),
         (result, "_match_torrents", make_stage(match_results, enabled, "match")),
+        (rust, "filter_torrents", make_probe(rust_filter, enabled, "rust_filter")),
+        (rust, "parse_metainfo", make_probe(rust_parse, enabled, "rust_parse")),
+        (metainfo, "_build_python_meta_info", make_probe(python_parse, enabled, "python_parse")),
+        (metainfo, "_meta_from_rust", make_probe(project_meta, enabled, "rust_projection")),
+        (RuleHelper, "get_rule_group_by_media", make_probe(rule_groups, enabled, "rule_group_lookup")),
+        (ProgressHelper, "update", make_probe(progress_update, enabled, "progress_update")),
         (manual, "_page_events", make_scope(make_page_events(page_events, streaming_enabled, parse_pool), enabled, is_music, generator=True)),
         (execution.SearchExecutionOwner, "run", staticmethod(make_scope(make_execution_run(run, enabled, no_plugin_sources), enabled, is_music))),
         (execution.SearchExecutionOwner, "events", staticmethod(make_scope(make_execution_events(events, enabled, no_plugin_sources), enabled, is_music, generator=True))),

@@ -7,7 +7,7 @@ from types import ModuleType, SimpleNamespace as NS
 
 import pytest
 
-from fastsearch.recognition import ACTIVE, SearchCache, SearchReuse, make_meta, make_same_work, make_scope
+from fastsearch.recognition import ACTIVE, SearchCache, SearchReuse, make_meta, make_same_work, make_scope, make_probe
 from conftest import native_nodes
 
 
@@ -192,3 +192,20 @@ def test_generator_exception_and_cancel_release_scope(monkeypatch):
             await pending
         assert ACTIVE.get() is None
     asyncio.run(run())
+
+
+def test_probe_preserves_native_return_and_failure():
+    token = ACTIVE.set(SearchReuse())
+    try:
+        assert make_probe(lambda: None, lambda: True, "rust_filter")() is None
+        value = []
+        assert make_probe(lambda: value, lambda: True, "rust_filter")() is value
+        def failure():
+            raise ValueError("native failure")
+        with pytest.raises(ValueError):
+            make_probe(failure, lambda: True, "rust_filter")()
+        probe = ACTIVE.get().snapshot()["probes"]["rust_filter"]
+        assert probe["calls"] == 3 and probe["none_results"] == 1 and probe["errors"] == 1
+        assert probe["wall_seconds"] >= 0 and probe["thread_cpu_seconds"] >= 0
+    finally:
+        ACTIVE.reset(token)

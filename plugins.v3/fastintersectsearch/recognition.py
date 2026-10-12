@@ -18,6 +18,16 @@ class SearchCache:
         self.hits = 0
         self.misses = 0
         self.seconds = 0.0
+        self.operation_seconds = 0.0
+        self.copy_seconds = 0.0
+        self.wait_seconds = 0.0
+
+    def clone(self, value):
+        started = time.monotonic()
+        result = copy.deepcopy(value)
+        with self.lock:
+            self.copy_seconds += time.monotonic() - started
+        return result
 
     def reuse(self, key, operation):
         with self.lock:
@@ -30,14 +40,20 @@ class SearchCache:
             else:
                 future, owner = Future(), True
         if not owner:
-            return copy.deepcopy(future.result())
+            started = time.monotonic()
+            value = future.result()
+            with self.lock:
+                self.wait_seconds += time.monotonic() - started
+            return self.clone(value)
         try:
             started = time.monotonic()
             value = operation()  # Exceptions are not cached.
-            snapshot = copy.deepcopy(value)
+            operation_seconds = time.monotonic() - started
+            snapshot = self.clone(value)
             with self.lock:
                 self.misses += 1
                 self.seconds += time.monotonic() - started
+                self.operation_seconds += operation_seconds
             future.set_result(snapshot)
             return value
         except BaseException as error:
@@ -54,6 +70,7 @@ class SearchReuse:
         self.identity = SearchCache()
         self.started = time.monotonic()
         self.stages = {}
+        self.probes = {}
         self.lock = threading.Lock()
 
     def report(self):
@@ -69,11 +86,44 @@ class SearchReuse:
         """Counters and summed worker wall time, not exclusive search latency."""
         with self.lock:
             stages = dict(self.stages)
-        return {"parse": {"hits": self.parse.hits, "misses": self.parse.misses,
-                           "compute_seconds": round(self.parse.seconds, 3)},
-                "identity": {"hits": self.identity.hits, "misses": self.identity.misses,
-                              "compute_seconds": round(self.identity.seconds, 3)},
-                "stage_totals": stages}
+            probes = copy.deepcopy(self.probes)
+        def counters(cache):
+            return {"hits": cache.hits, "misses": cache.misses,
+                    "compute_seconds": round(cache.seconds, 6),
+                    "operation_seconds": round(cache.operation_seconds, 6),
+                    "copy_seconds": round(cache.copy_seconds, 6),
+                    "wait_seconds": round(cache.wait_seconds, 6)}
+        return {"parse": counters(self.parse), "identity": counters(self.identity),
+                "stage_totals": stages, "probes": probes}
+
+    def record(self, name, wall, cpu, none=False, error=False):
+        with self.lock:
+            bucket = self.probes.setdefault(name, {"calls": 0, "wall_seconds": 0.0,
+                                                   "thread_cpu_seconds": 0.0,
+                                                   "none_results": 0, "errors": 0})
+            bucket["calls"] += 1
+            bucket["wall_seconds"] += wall
+            bucket["thread_cpu_seconds"] += cpu
+            bucket["none_results"] += int(none)
+            bucket["errors"] += int(error)
+
+
+def make_probe(original, enabled, name):
+    """Observe real native execution and fallback; no return/exception changes."""
+    @wraps(original)
+    def probe(*args, **kwargs):
+        scope = ACTIVE.get()
+        if scope is None or not enabled():
+            return original(*args, **kwargs)
+        wall, cpu = time.monotonic(), time.thread_time()
+        none, error = False, True
+        try:
+            result = original(*args, **kwargs)
+            none, error = result is None, False
+            return result
+        finally:
+            scope.record(name, time.monotonic() - wall, time.thread_time() - cpu, none, error)
+    return probe
 
 
 def make_stage(original, enabled, name):
@@ -99,8 +149,11 @@ def make_meta(original, enabled, configuration):
         cache = ACTIVE.get()
         if cache is None or not enabled() or str(getattr(mediainfo.type, "value", mediainfo.type)).lower() in {"music", "音乐"}:
             return original(torrent, custom_words, mediainfo)
+        wall, cpu = time.monotonic(), time.thread_time()
+        config = configuration()
+        cache.record("parse_configuration", time.monotonic() - wall, time.thread_time() - cpu)
         key = (torrent.title, torrent.description, mediainfo.type,
-               None if custom_words is None else tuple(custom_words), configuration())
+               None if custom_words is None else tuple(custom_words), config)
         return cache.parse.reuse(key, lambda: original(torrent, custom_words, mediainfo))
     return meta
 

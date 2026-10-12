@@ -16,6 +16,12 @@ def patch_types(monkeypatch):
     module = pytypes.ModuleType("app.schemas.types")
     module.MediaType = _MediaType
     monkeypatch.setitem(sys.modules, "app.schemas.types", module)
+    rust = pytypes.ModuleType("app.adapters.system.rust")
+    rust.status = lambda: {"available": True, "enabled": True}
+    system = pytypes.ModuleType("app.adapters.system")
+    system.rust = rust
+    monkeypatch.setitem(sys.modules, "app.adapters.system", system)
+    monkeypatch.setitem(sys.modules, "app.adapters.system.rust", rust)
 
 
 def test_resolve_mtype_accepts_labels_enum_and_none(monkeypatch):

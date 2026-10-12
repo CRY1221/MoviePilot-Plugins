@@ -19,7 +19,9 @@ def test_all_installed_hook_signatures_match_pinned_native_source():
     for relative in ["app/chain/base.py", "app/chain/search/manual.py", "app/chain/search/execution.py",
                      "app/chain/search/scan.py", "app/chain/subscribe/searchtask.py", "app/chain/search/title.py",
                          "app/chain/search/facade.py", "app/chain/search/pagination.py",
-                         "app/chain/search/plan.py", "app/chain/search/result.py"]:
+                         "app/chain/search/plan.py", "app/chain/search/result.py",
+                         "app/adapters/system/rust.py", "app/domain/metainfo.py",
+                         "app/application/rules.py", "app/runtime/progress.py"]:
         tree = ast.parse((KERNEL / relative).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -40,7 +42,7 @@ def test_all_installed_hook_signatures_match_pinned_native_source():
             actual = "generator" if any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(node)) else "async"
         assert actual == expected, name
         checked.append(name)
-    assert len(checked) == 23
+    assert len(checked) == 29
 
 
 def test_compatibility_rejects_unknown_or_wrapped_hooks():
