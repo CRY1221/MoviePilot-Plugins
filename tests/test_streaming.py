@@ -10,7 +10,7 @@ from types import ModuleType, SimpleNamespace as NS
 import pytest
 
 from fastsearch.streaming import (ParsePool, make_page_events, make_dedup, parse_page, DEFER_DEDUP,
-                                make_provider_warm)
+                                make_provider_warm, make_plan_scope)
 from conftest import native_nodes
 
 
@@ -252,9 +252,28 @@ def test_defer_page_dedup_preserves_native_global_order_and_last_representative(
         pool.close()
 
 
+def site_batches(delays=(0.25, 0.25, 0.25), seen=None):
+    """Fake provider stream: one event per site, each after its own latency."""
+    async def provider_events(owner, step, streaming):
+        for index, delay in enumerate(delays):
+            await asyncio.sleep(delay)
+            if seen is not None:
+                seen.append(time.monotonic())
+            yield {"items": [NS(title=f"batch{index}")], "site": index}
+    return provider_events
+
+
+def under_plan(provider_events, pool, step, enabled=lambda: True):
+    """Drive the provider wrapper the way production does: inside a plan scope."""
+    async def plan_events(owner, plan, media_chain, streaming):
+        async for event in make_provider_warm(provider_events, enabled, pool)(None, step, True):
+            yield event
+    return make_plan_scope(plan_events, enabled)
+
+
 def test_provider_warm_parses_each_batch_while_later_sites_still_answer(monkeypatch):
-    """预热必须与后续站点抓取重叠，且逐个事件原样透传。"""
-    parsed, yielded = [], []
+    """预热必须与后续站点抓取重叠，逐个事件原样透传，且用 plan 自己的识别词。"""
+    parsed, yielded, order = [], [], []
     module = ModuleType("app.chain.search.result")
 
     def torrent_meta(torrent, custom_words, mediainfo):
@@ -265,21 +284,13 @@ def test_provider_warm_parses_each_batch_while_later_sites_still_answer(monkeypa
     monkeypatch.setitem(sys.modules, "app.chain.search", ModuleType("app.chain.search"))
     monkeypatch.setitem(sys.modules, "app.chain.search.result", module)
 
-    order = []
-
-    async def provider_events(owner, step, streaming):
-        for index in range(3):
-            await asyncio.sleep(0.25)
-            order.append(("fetch", index, time.monotonic()))
-            yield {"items": [NS(title=f"batch{index}")], "site": index}
-
+    words = ["兰香"]
     pool = ParsePool(workers=2)
     try:
-        wrapper = make_provider_warm(provider_events, lambda: True, pool)
-        step = NS(params={"mediainfo": NS(type="电影")})
+        scoped = under_plan(site_batches(seen=order), pool, NS(params={"mediainfo": NS(type="电影")}))
 
         async def drain():
-            async for event in wrapper(None, step, True):
+            async for event in scoped(None, NS(custom_words=words), None, True):
                 yielded.append(event)
 
         asyncio.run(drain())
@@ -289,34 +300,33 @@ def test_provider_warm_parses_each_batch_while_later_sites_still_answer(monkeypa
     # 事件原样透传，顺序不变
     assert [e["site"] for e in yielded] == [0, 1, 2]
     assert [e["items"][0].title for e in yielded] == ["batch0", "batch1", "batch2"]
-    # 每批都被解析，且没有 custom_words 参与缓存键
     assert sorted(t for t, _, _ in parsed) == ["batch0", "batch1", "batch2"]
-    assert {words for _, words, _ in parsed} == {None}
-    # 重叠证据：第 0 批的解析发生在第 2 批被抓到之前
-    first_parse = min(t for _, _, t in parsed)
-    assert first_parse < order[-1][2], "第 0 批的解析必须早于最后一次抓取完成"
+    # 识别词必须与原生调用一致，否则缓存键对不上、白算一遍（实测踩过）
+    assert {id(w) for _, w, _ in parsed} == {id(words)}
+    # 重叠证据：第 0 批的解析发生在最后一批被抓到之前
+    assert min(t for _, _, t in parsed) < order[-1], "第 0 批的解析必须早于最后一次抓取完成"
 
 
-def test_provider_warm_is_inert_when_disabled_or_music(monkeypatch):
+def test_provider_warm_is_inert_when_disabled_music_or_unknown(monkeypatch):
     calls = []
     module = ModuleType("app.chain.search.result")
     module._torrent_meta = lambda *args: calls.append(args)
     monkeypatch.setitem(sys.modules, "app.chain.search", ModuleType("app.chain.search"))
     monkeypatch.setitem(sys.modules, "app.chain.search.result", module)
 
-    async def provider_events(owner, step, streaming):
-        yield {"items": [NS(title="x")]}
-
+    plan = NS(custom_words=[])
     pool = ParsePool(workers=1)
     try:
-        cases = ((False, {"mediainfo": NS(type="电影")}),   # 插件停用
-                 (True, {"mediainfo": NS(type="音乐")}),     # 音乐透传
-                 (True, {}))                                 # 没有 mediainfo
-        for enabled, params in cases:
-            step = NS(params=params)
+        cases = ((False, plan, {"mediainfo": NS(type="电影")}),   # 插件停用
+                 (True, None, {"mediainfo": NS(type="电影")}),    # 没有 plan 作用域
+                 (True, plan, {"mediainfo": NS(type="音乐")}),    # 音乐透传
+                 (True, plan, {}))                                # 没有 mediainfo
+        for enabled, scope_plan, params in cases:
+            scoped = under_plan(site_batches(delays=(0,)), pool, NS(params=params),
+                                enabled=lambda enabled=enabled: enabled)
 
             async def drain():
-                return [event async for event in make_provider_warm(provider_events, lambda: enabled, pool)(None, step, True)]
+                return [event async for event in scoped(None, scope_plan, None, True)]
 
             assert len(asyncio.run(drain())) == 1
         assert calls == []

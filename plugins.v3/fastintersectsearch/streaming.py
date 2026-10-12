@@ -19,6 +19,7 @@ from .scheduling import is_music, AGGREGATE_PAGES
 from .rulecompat import VALIDATION
 
 DEFER_DEDUP = ContextVar("fastsearch_defer_page_dedup", default=False)
+EXEC_PLAN = ContextVar("fastsearch_execution_plan", default=None)
 LAST_COMPARISON = None
 
 
@@ -102,15 +103,29 @@ class ParsePool:
         self.executor.shutdown(wait=False, cancel_futures=True)
 
 
-def warm_meta(torrents, mediainfo):
-    """Run the native parse for one finished site batch so the cache is warm.
+def warm_meta(torrents, custom_words, mediainfo):
+    """Parse one finished site batch so the native parse finds it cached.
 
-    Passing no custom words means the entry is only reused when the native call
-    also uses none; any other configuration simply recomputes and ignores this.
+    The custom words must be the very ones the native call will use; a key that
+    differs by even one field makes this pure duplicated work, so the caller
+    passes the plan's own value rather than a guess.
     """
     from app.chain.search import result
     for torrent in torrents:
-        result._torrent_meta(torrent, None, mediainfo)
+        result._torrent_meta(torrent, custom_words, mediainfo)
+
+
+def make_plan_scope(original, enabled):
+    """Publish the running plan so per-batch parsing can reuse its own settings."""
+    @wraps(original)
+    async def events(owner, plan, media_chain, streaming=True):
+        token = EXEC_PLAN.set(plan if enabled() else None)
+        try:
+            async for event in original(owner, plan, media_chain, streaming=streaming):
+                yield event
+        finally:
+            EXEC_PLAN.reset(token)
+    return events
 
 
 def make_provider_warm(original, enabled, pool):
@@ -125,18 +140,21 @@ def make_provider_warm(original, enabled, pool):
     @wraps(original)
     async def provider_events(owner, step, streaming):
         params = getattr(step, "params", None)
+        plan = EXEC_PLAN.get()
         mediainfo = params.get("mediainfo") if isinstance(params, dict) else None
-        if (not enabled() or mediainfo is None
+        if (not enabled() or plan is None or mediainfo is None
                 or is_music(getattr(mediainfo, "type", None))):
             async for event in original(owner, step, streaming):
                 yield event
             return
+        custom_words = plan.custom_words
         pending = []
         try:
             async for event in original(owner, step, streaming):
                 items = event.get("items") if isinstance(event, dict) else None
                 if items:
-                    pending.append(asyncio.create_task(pool.run(warm_meta, list(items), mediainfo)))
+                    pending.append(asyncio.create_task(
+                        pool.run(warm_meta, list(items), custom_words, mediainfo)))
                 yield event
         finally:
             # Only the final batch cannot overlap anything; earlier ones already
