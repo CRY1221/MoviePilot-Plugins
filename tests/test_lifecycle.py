@@ -7,9 +7,10 @@ from types import ModuleType, SimpleNamespace as NS
 
 import pytest
 
-from conftest import ROOT
+from conftest import ROOT, KERNEL, native_nodes
 from fastsearch import compat
 from fastsearch.hooks import Hooks
+from fastsearch.streaming import ParsePool, parse_page
 
 
 def host(monkeypatch):
@@ -54,7 +55,7 @@ def host(monkeypatch):
         scope = {"__name__": "app.isolated_host"}
         exec(code, scope)
         function = scope[name]
-        if target is targets["execution.SearchExecutionOwner"] or target is targets["SearchResultOwner"]:
+        if isinstance(target, type) and (not args or args[0] != "self"):
             function = staticmethod(function)
         setattr(target, name, function)
     modules["chain.search.facade"].SearchChain = targets["SearchChain"]
@@ -83,10 +84,44 @@ def test_install_and_restore_all_descriptors(monkeypatch):
     targets = host(monkeypatch)
     before = {key: dict(vars(target)) for key, target in targets.items()}
     hooks = compat.install(lambda: True, lambda: True, 5)
-    assert len(hooks.patches) == 26
+    assert len(hooks.patches) == 27
     hooks.close()
     for key, target in targets.items():
         assert vars(target) == before[key]
+
+
+def test_real_facade_dedup_alias_is_deferred_and_restored(monkeypatch):
+    targets = host(monkeypatch)
+    owner = native_nodes("app/chain/search/result.py", {"SearchResultOwner"},
+                         {"_SearchOwnerBase": object})["SearchResultOwner"]
+    native_dedup = owner._remove_duplicate
+    targets["SearchResultOwner"]._remove_duplicate = staticmethod(native_dedup)
+    # Execute the exact native facade alias, which is a separate descriptor.
+    tree = ast.parse((KERNEL / "app/chain/search/facade.py").read_text(encoding="utf-8"))
+    facade = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SearchChain")
+    alias = next(n for n in facade.body if isinstance(n, ast.Assign)
+                 and any(isinstance(t, ast.Name) and t.id == "_remove_duplicate" for t in n.targets))
+    scope = {"SearchResultOwner": owner}
+    exec(compile(ast.Module(body=[alias], type_ignores=[]), "native_facade_alias", "exec"), scope)
+    chain = targets["SearchChain"]
+    chain._remove_duplicate = scope["_remove_duplicate"]
+    descriptor = vars(chain)["_remove_duplicate"]
+    def context(title, seeders):
+        return NS(torrent_info=NS(site_name="site", title=title, description="", seeders=seeders),
+                  media_info_is_target=True)
+    first, other, last = context("duplicate", 100), context("other", 50), context("duplicate", 1)
+    sorter = lambda items: sorted(items, key=lambda c: c.torrent_info.seeders, reverse=True)
+    manual = NS(results=lambda items: chain._remove_duplicate(sorter(items)))
+    expected = manual.results([first, last, other])
+    hooks = compat.install(lambda: True, lambda: True, 3)
+    pool = ParsePool(sorter=sorter, dedup=native_dedup)
+    try:
+        assert pool.merge([parse_page(manual, [first, last]), parse_page(manual, [other])]) == expected
+        assert manual.results([first, last]) == [last]
+    finally:
+        pool.close()
+        hooks.close()
+    assert vars(chain)["_remove_duplicate"] is descriptor
 
 
 def test_install_rolls_back_owned_changes_on_mid_transaction_error(monkeypatch):
@@ -125,7 +160,7 @@ def test_reload_then_old_stop_does_not_unhook_new_instance(monkeypatch):
     assert not first.get_state() and second.get_state()
     first.stop_service()
     assert Plugin.get_instance() is second
-    assert len(second._hooks.patches) == 26
+    assert len(second._hooks.patches) == 27
     second.stop_service()
     assert Plugin.get_instance() is None
 

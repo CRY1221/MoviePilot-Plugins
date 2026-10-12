@@ -78,6 +78,7 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
     progress_update = require(ProgressHelper, "update", "self value text data")
     native_error = require(rust, "_raise_non_rust_panic", "err")
     dedup = require(SearchResultOwner, "_remove_duplicate", "_torrents")
+    facade_dedup = require(SearchChain, "_remove_duplicate", "_torrents")
 
     def parse_configuration():
         # MP clears/rebuilds these options when parsing settings change. Include
@@ -131,6 +132,7 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
         (ProgressHelper, "update", make_probe(progress_update, enabled, "progress_update")),
         (rust, "_raise_non_rust_panic", make_native_error(native_error, enabled)),
         (SearchResultOwner, "_remove_duplicate", staticmethod(make_dedup(dedup))),
+        (SearchChain, "_remove_duplicate", staticmethod(make_dedup(facade_dedup))),
         (manual, "_page_events", make_scope(make_page_events(page_events, streaming_enabled, parse_pool), enabled, is_music, generator=True)),
         (execution.SearchExecutionOwner, "run", staticmethod(make_scope(make_execution_run(run, enabled, no_plugin_sources), enabled, is_music))),
         (execution.SearchExecutionOwner, "events", staticmethod(make_scope(make_execution_events(events, enabled, no_plugin_sources), enabled, is_music, generator=True))),
