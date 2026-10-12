@@ -242,3 +242,13 @@ def make_keyword_delay(original, enabled):
     def delay(owner, search_count):
         return 0 if enabled() and SEARCH_SCOPE.get() is owner else original(owner, search_count)
     return delay
+
+
+def make_resource_pages(original, enabled, max_pages):
+    """Raise the page budget for影视搜索 only; subtitles keep the native value."""
+    @wraps(original)
+    def pages():
+        if enabled() and SEARCH_SCOPE.get() is not None:
+            return max(1, int(max_pages()))
+        return original()
+    return pages

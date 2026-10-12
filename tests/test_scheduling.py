@@ -10,7 +10,8 @@ import pytest
 from conftest import native_nodes
 from fastsearch.hooks import Hooks
 from fastsearch.scheduling import (SiteRequestGate, make_site_sync, make_site_async,
-    make_read_pages, make_execution_run, make_execution_events, make_keyword_delay, SEARCH_SCOPE)
+    make_read_pages, make_execution_run, make_execution_events, make_keyword_delay,
+    make_resource_pages, SEARCH_SCOPE)
 
 
 def test_binding_inheritance_and_third_party_ownership():
@@ -325,3 +326,15 @@ def test_non_pageable_site_and_errors_stop_the_walk():
     wrapper = make_read_pages(lambda *_: None, offload, lambda: True, lambda: 10)
     asyncio.run(collect(wrapper, manual, ["1:alpha"]))
     assert manual.calls == [0, 1]
+
+
+def test_resource_pages_only_override_inside_a_media_search():
+    wrapper = make_resource_pages(lambda: 3, lambda: True, lambda: 10)
+    assert wrapper() == 3                      # outside a媒体搜索: MP's own value
+    token = SEARCH_SCOPE.set(object())
+    try:
+        assert wrapper() == 10                 # inside影视搜索: our page cap
+    finally:
+        SEARCH_SCOPE.reset(token)
+    assert wrapper() == 3
+    assert make_resource_pages(lambda: 3, lambda: False, lambda: 10)() == 3

@@ -6,6 +6,7 @@ from .hooks import Hooks
 from .scheduling import (
     SHARED_GATE, is_music, make_site_sync, make_site_async, make_read_pages,
     make_execution_run, make_execution_events, make_keyword_delay,
+    make_resource_pages,
 )
 from .subscription import make_owned_task, make_advance_sources
 from .presentation import make_title_stream
@@ -58,6 +59,9 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
     run = require(execution.SearchExecutionOwner, "run", "owner plan media_chain")
     events = require(execution.SearchExecutionOwner, "events", "owner plan media_chain streaming", "generator")
     delay = require(execution, "_keyword_delay", "owner search_count")
+    from app.chain.search.pagination import SearchPaginationOwner
+    resource_pages = require(SearchPaginationOwner, "_get_search_resource_pages", "")
+    facade_resource_pages = require(SearchChain, "_get_search_resource_pages", "")
     advance = require(SearchScan, "_advance_sources", "self keys submit started")
     require(SearchScan, "run", "self submit")
     require(SearchScan, "step", "self key")
@@ -90,6 +94,10 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
         (execution.SearchExecutionOwner, "run", staticmethod(make_execution_run(run, enabled, no_plugin_sources))),
         (execution.SearchExecutionOwner, "events", staticmethod(make_execution_events(events, enabled, no_plugin_sources))),
         (execution, "_keyword_delay", make_keyword_delay(delay, enabled)),
+        (SearchPaginationOwner, "_get_search_resource_pages",
+         staticmethod(make_resource_pages(resource_pages, enabled, max_pages))),
+        (SearchChain, "_get_search_resource_pages",
+         staticmethod(make_resource_pages(facade_resource_pages, enabled, max_pages))),
         (SearchScan, "_advance_sources", make_advance_sources(advance, subscription_enabled)),
         (SubscriptionSearchTaskRunner, "_execute_owned_task", make_owned_task(owned, subscription_enabled)),
         (SearchTitleOwner, "_resolve_title_request", sorted_title),
