@@ -2,12 +2,13 @@
   "FastIntersectSearch": {
     "name": "极速搜索",
     "description": "跨站并发、同站默认 3 秒，覆盖网页、通知渠道、智能助手和新订阅首搜；规则、排序及下载决策沿用 MP。",
-    "version": "3.6.10",
+    "version": "3.6.11",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png",
     "author": "CRY1221",
     "level": 1,
     "system_version": ">=3.1.4",
     "history": {
+      "v3.6.11": "识别词条数超过 MoviePilot-Rust 的正则编译缓存容量（256）时，转入 MP 自带的 Python 解析器：Rust 侧缓存装不下会让每条标题重编译约 145 个正则（实测 82 ms/次，Python 侧 4.6 ms/次）。沿用 MP 既有的 _requires_python_metainfo 判据，仅在搜索与订阅作用域内生效；候选、规则与排序不变。",
       "v3.6.10": "把原生探针写进日志：分别记录 rust_filter/rust_parse/python_parse/rust_projection 等的调用次数、线程墙钟与 CPU，用于判断解析是否真的走了 Rust 还是回退 Python。不改任何搜索行为。",
       "v3.6.9": "修正解析预热的识别词取值：原生 _parse_result 向下传的是 custom_words or []，预热须用同一转换，否则缓存键恒不命中、重复计算。",
       "v3.6.8": "修正 3.6.7 的解析预热缓存键：改用搜索计划自身的识别词，此前用 None 导致预热结果与原生调用对不上、重复计算反而更慢。",
