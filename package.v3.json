@@ -2,13 +2,14 @@
   "FastIntersectSearch": {
     "name": "极速搜索",
     "description": "跨站并发、同站默认 3 秒，覆盖网页、通知渠道、智能助手和新订阅首搜；规则、排序及下载决策沿用 MP。",
-    "version": "3.6.12",
+    "version": "3.6.13",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png",
     "author": "CRY1221",
     "level": 1,
     "system_version": ">=3.1.4",
     "history": {
-      "v3.6.12": "页数上限扩展到按关键词/标题搜索：原先只有按 ID 搜索吃得到，助手 search.title、工作流「搜索站点资源」和网页非流式标题搜索都只按原生页数抓取。现在三条链路共用同一个上限，并把它做成可配置（该值同时作用于按 ID 与按关键词搜索）。插件默认值由 10 改为 1，与 MP 源码默认一致，即默认只搜首页；想要更多结果自行调大。",
+      "v3.6.13": "补齐流式标题搜索——网页与助手工具日常走的正是这条，3.6.12 只包了非流式那三条，所以对实际搜索没有生效。同时确认：按标题/关键词搜索此前一直只抓首页（MP 源码 search_resource_pages 默认即 1），现已由插件设置里的页数上限接管；按 ID 与按关键词搜索共用同一个上限。",
+      "v3.6.12": "页数上限扩展到非流式标题/关键词搜索（助手 search.title、工作流、非流式标题接口）：这些入口原先只按原生页数抓取。插件默认值由 10 改为 1。",
       "v3.6.11": "识别词条数超过 MoviePilot-Rust 的正则编译缓存容量（256）时，转入 MP 自带的 Python 解析器：Rust 侧缓存装不下会让每条标题重编译约 145 个正则（实测 82 ms/次，Python 侧 4.6 ms/次）。沿用 MP 既有的 _requires_python_metainfo 判据，仅在搜索与订阅作用域内生效；候选、规则与排序不变。",
       "v3.6.10": "把原生探针写进日志：分别记录 rust_filter/rust_parse/python_parse/rust_projection 等的调用次数、线程墙钟与 CPU，用于判断解析是否真的走了 Rust 还是回退 Python。不改任何搜索行为。",
       "v3.6.9": "修正解析预热的识别词取值：原生 _parse_result 向下传的是 custom_words or []，预热须用同一转换，否则缓存键恒不命中、重复计算。",

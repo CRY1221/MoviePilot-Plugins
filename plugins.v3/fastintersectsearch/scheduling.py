@@ -246,14 +246,15 @@ def make_keyword_delay(original, enabled):
     return delay
 
 
-def make_title_scope(original, enabled, asynchronous=False):
+def make_title_scope(original, enabled, asynchronous=False, generator=False):
     """Give title search the page budget the id search path already has.
 
     SEARCH_SCOPE is published by the execution owners, so callers that reach the
-    provider directly — the agent's search.title tool, the workflow action and
-    the non-streaming title endpoint — kept the native page count. The page list
-    is built at the top of this call, so publishing the scope here covers every
-    title-search variant at one point, without touching the native policy.
+    provider directly — the web page, both agent search tools, the workflow
+    action and the non-streaming title endpoint — kept the native page count,
+    which defaults to a single page. The page list is built at the top of this
+    call, so publishing the scope here covers every title variant at one point
+    without touching the native policy.
     """
     signature = inspect.signature(original)
 
@@ -261,6 +262,31 @@ def make_title_scope(original, enabled, asynchronous=False):
         values = signature.bind(owner, *args, **kwargs).arguments
         mtype = values.get("mtype") or getattr(values.get("mediainfo"), "type", None)
         return owner if enabled() and not is_music(mtype) else None
+
+    if generator:
+        @wraps(original)
+        async def scoped(owner, *args, **kwargs):
+            # The provider body only runs on anext, so the scope has to be held
+            # across each pull rather than around the call that builds it.
+            value = scope(owner, args, kwargs)
+            events = original(owner, *args, **kwargs)
+            try:
+                while True:
+                    token = SEARCH_SCOPE.set(value)
+                    try:
+                        item = await anext(events)
+                    except StopAsyncIteration:
+                        break
+                    finally:
+                        SEARCH_SCOPE.reset(token)
+                    yield item
+            finally:
+                token = SEARCH_SCOPE.set(value)
+                try:
+                    await events.aclose()
+                finally:
+                    SEARCH_SCOPE.reset(token)
+        return scoped
 
     if asynchronous:
         @wraps(original)

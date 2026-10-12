@@ -421,3 +421,19 @@ def test_title_scope_prefers_explicit_mtype_and_keeps_arguments():
                   area="imdbid", mtype=NS(value="电影")) == "ok"
     assert seen == [owner]
     assert passed == [("kw", NS(type=NS(value="电视剧")), [7], 2, "imdbid", NS(value="电影"))]
+
+
+def test_title_scope_is_held_across_every_stream_pull():
+    seen = []
+    async def original(self, keyword, mediainfo=None, sites=None, page=0, area="title", mtype=None):
+        seen.append(SEARCH_SCOPE.get())
+        yield {"page": 1}
+        seen.append(SEARCH_SCOPE.get())
+        yield {"page": 2}
+    scoped = make_title_scope(original, lambda: True, generator=True)
+    owner = object()
+    async def collect():
+        return [item async for item in scoped(owner, "kw")]
+    assert asyncio.run(collect()) == [{"page": 1}, {"page": 2}]
+    assert seen == [owner, owner]
+    assert SEARCH_SCOPE.get() is None

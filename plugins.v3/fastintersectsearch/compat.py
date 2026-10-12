@@ -70,6 +70,8 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
                         "self keyword mediainfo sites page area mtype")
     async_all_sites = require(SearchChain, "_SearchChain__async_search_all_sites",
                               "self keyword mediainfo sites page area mtype", "async")
+    stream_all_sites = require(SearchChain, "_SearchChain__async_search_all_sites_stream",
+                               "self keyword mediainfo sites page area mtype", "generator")
     read = require(manual, "_read_pages", "manual keys page", "generator")
     page_events = require(manual, "_page_events", "manual params", "generator")
     torrent_meta = require(result, "_torrent_meta", "torrent custom_words mediainfo")
@@ -159,6 +161,8 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
         (SearchChain, "_SearchChain__search_all_sites", make_title_scope(all_sites, enabled)),
         (SearchChain, "_SearchChain__async_search_all_sites",
          make_title_scope(async_all_sites, enabled, asynchronous=True)),
+        (SearchChain, "_SearchChain__async_search_all_sites_stream",
+         make_title_scope(stream_all_sites, enabled, generator=True)),
         (SearchScan, "_advance_sources", make_advance_sources(advance, subscription_enabled)),
         (SubscriptionSearchTaskRunner, "_execute_owned_task", make_owned_task(owned, subscription_enabled)),
         (SearchTitleOwner, "_resolve_title_request", make_scope(sorted_title, enabled, is_music)),
