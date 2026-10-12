@@ -27,7 +27,7 @@ def host(monkeypatch):
     modules = {name: module("app." + name) for name in [
         "chain.search.facade", "chain.search.manual", "chain.search.execution", "chain.search.scan",
         "chain.search.title", "chain.search.result", "chain.search.pagination",
-        "chain.subscribe.searchtask", "application.torrent.download",
+        "chain.subscribe.searchtask", "chain.subscribe.facade", "application.torrent.download",
         "application.subscription.sitebudget", "sdk.plugin", "domain.metainfo",
         "adapters.system.rust", "application.rules", "runtime.progress"]}
     targets = {
@@ -36,6 +36,7 @@ def host(monkeypatch):
         "SearchSources": type("SearchSources", (), {}), "SearchTitleOwner": type("SearchTitleOwner", (), {}),
         "SubscriptionSearchTaskRunner": type("SubscriptionSearchTaskRunner", (), {}),
         "SearchPaginationOwner": type("SearchPaginationOwner", (), {}),
+        "SubscribeChain": type("SubscribeChain", (), {}),
         "result": modules["chain.search.result"],
         "metainfo": modules["domain.metainfo"], "rust": modules["adapters.system.rust"],
         "RuleHelper": type("RuleHelper", (), {}), "ProgressHelper": type("ProgressHelper", (), {}),
@@ -59,6 +60,7 @@ def host(monkeypatch):
             function = staticmethod(function)
         setattr(target, name, function)
     modules["chain.search.facade"].SearchChain = targets["SearchChain"]
+    modules["chain.subscribe.facade"].SubscribeChain = targets["SubscribeChain"]
     modules["chain.search.scan"].SearchScan = targets["SearchScan"]
     modules["chain.search.scan"].SearchSources = targets["SearchSources"]
     modules["chain.search.scan"].AUTOMATIC_REQUEST_INTERVAL = 10
@@ -84,7 +86,7 @@ def test_install_and_restore_all_descriptors(monkeypatch):
     targets = host(monkeypatch)
     before = {key: dict(vars(target)) for key, target in targets.items()}
     hooks = compat.install(lambda: True, lambda: True, 5)
-    assert len(hooks.patches) == 32
+    assert len(hooks.patches) == 33
     hooks.close()
     for key, target in targets.items():
         assert vars(target) == before[key]
@@ -160,7 +162,7 @@ def test_reload_then_old_stop_does_not_unhook_new_instance(monkeypatch):
     assert not first.get_state() and second.get_state()
     first.stop_service()
     assert Plugin.get_instance() is second
-    assert len(second._hooks.patches) == 32
+    assert len(second._hooks.patches) == 33
     second.stop_service()
     assert Plugin.get_instance() is None
 

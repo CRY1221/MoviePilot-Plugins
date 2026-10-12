@@ -3,10 +3,15 @@ from types import SimpleNamespace as NS
 import threading
 import time
 
+import sys
+from types import ModuleType
+
 import pytest
 
 from conftest import native_nodes, native_domain
-from fastsearch.subscription import SUBSCRIPTION_SCOPE, make_advance_sources, make_owned_task
+from dataclasses import dataclass
+from fastsearch.subscription import (SUBSCRIPTION_SCOPE, make_advance_sources,
+                                     make_full_pack_first, make_owned_task)
 
 
 def scan_fixture(full=True, page_limit=None):
@@ -147,3 +152,76 @@ def test_runner_source_scope_not_subscription_state(source):
     assert make_owned_task(native, lambda: True)(runner, subscribe=NS(state="R"), task_id="t",
                                                lease_token="l", execution_lease=lease, cancelled=lambda: False) == 42
     assert SUBSCRIPTION_SCOPE.get() is None
+
+
+@dataclass(frozen=True, slots=True)
+class FakeSubscribe:
+    best_version: int = 0
+    best_version_full: int = 0
+    downloaded: tuple = ()
+
+
+def priority_module(monkeypatch):
+    package = ModuleType("app.application.subscription")
+    package.__path__ = []
+    priority = ModuleType("app.application.subscription.priority")
+    priority.is_full_best_version_enabled = lambda subscribe: bool(
+        subscribe.best_version and subscribe.best_version_full)
+    priority.get_downloaded_best_version_episodes = lambda subscribe: list(subscribe.downloaded)
+    package.priority = priority
+    monkeypatch.setitem(sys.modules, "app.application.subscription", package)
+    monkeypatch.setitem(sys.modules, "app.application.subscription.priority", priority)
+    return priority
+
+
+def test_full_pack_first_asks_once_more_on_a_first_search(monkeypatch):
+    priority_module(monkeypatch)
+    seen = []
+
+    def original(subscribe, mediakey):
+        seen.append((subscribe.best_version, mediakey))
+        return {"season": 1} if subscribe.best_version else None
+
+    build = make_full_pack_first(original, lambda: True)
+    assert build(FakeSubscribe(), "media-key") == {"season": 1}
+    assert seen == [(0, "media-key"), (1, "media-key")]
+
+
+def test_full_pack_first_never_questions_a_native_answer(monkeypatch):
+    priority_module(monkeypatch)
+    seen = []
+
+    def original(subscribe, mediakey):
+        seen.append(subscribe.best_version)
+        return {"native": True}
+
+    build = make_full_pack_first(original, lambda: True)
+    assert build(FakeSubscribe(), "k") == {"native": True}
+    assert seen == [0]
+
+
+def test_full_pack_first_leaves_downloaded_and_full_best_version_alone(monkeypatch):
+    priority_module(monkeypatch)
+    seen = []
+
+    def original(subscribe, mediakey):
+        seen.append(subscribe.best_version)
+        return None
+
+    build = make_full_pack_first(original, lambda: True)
+    assert build(FakeSubscribe(downloaded=(1, 2)), "k") is None
+    assert build(FakeSubscribe(best_version=1, best_version_full=1), "k") is None
+    assert seen == [0, 1]
+
+
+def test_full_pack_first_stays_off_when_the_plugin_is_disabled(monkeypatch):
+    priority_module(monkeypatch)
+    seen = []
+
+    def original(subscribe, mediakey):
+        seen.append(subscribe.best_version)
+        return None
+
+    build = make_full_pack_first(original, lambda: False)
+    assert build(FakeSubscribe(), "k") is None
+    assert seen == [0]

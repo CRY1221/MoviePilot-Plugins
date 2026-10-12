@@ -8,7 +8,7 @@ from .scheduling import (
     make_execution_run, make_execution_events, make_keyword_delay,
     make_resource_pages, make_title_scope,
 )
-from .subscription import make_owned_task, make_advance_sources
+from .subscription import make_owned_task, make_advance_sources, make_full_pack_first
 from .presentation import make_title_stream
 from .streaming import (ParsePool, make_page_events, make_dedup, make_provider_warm,
                         make_plan_scope)
@@ -46,6 +46,7 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
     from app.application.rules import RuleHelper
     from app.runtime.progress import ProgressHelper
     from app.chain.subscribe.searchtask import SubscriptionSearchTaskRunner
+    from app.chain.subscribe.facade import SubscribeChain
     from app.application.torrent.download import TorrentHelper
     from app.sdk.plugin import PluginManager
 
@@ -107,6 +108,8 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
     require(SearchScan, "run", "self submit")
     require(SearchScan, "step", "self key")
     require(SearchSources, "fetch", "self key page budget")
+    full_pack_first = require(SubscribeChain, "_SubscribeChain__build_full_pack_first_no_exists",
+                              "subscribe mediakey")
     owned = require(SubscriptionSearchTaskRunner, "_execute_owned_task",
                     "self subscribe task_id lease_token execution_lease cancelled")
     resolve = require(SearchTitleOwner, "_resolve_title_request", "self request")
@@ -165,6 +168,8 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
          make_title_scope(stream_all_sites, enabled, generator=True)),
         (SearchScan, "_advance_sources", make_advance_sources(advance, subscription_enabled)),
         (SubscriptionSearchTaskRunner, "_execute_owned_task", make_owned_task(owned, subscription_enabled)),
+        (SubscribeChain, "_SubscribeChain__build_full_pack_first_no_exists",
+         staticmethod(make_full_pack_first(full_pack_first, subscription_enabled))),
         (SearchTitleOwner, "_resolve_title_request", make_scope(sorted_title, enabled, is_music)),
         (SearchTitleOwner, "async_search_by_title_stream", make_scope(make_title_stream(
             title_stream, enabled, title._build_title_search_params, title._build_title_contexts,

@@ -102,3 +102,34 @@ def make_advance_sources(original, enabled, workers=8):
             # checkpointed, and never cause submit/settle on their own.
             pool.shutdown(wait=True, cancel_futures=True)
     return advance
+
+
+def make_full_pack_first(original, enabled):
+    """Let MoviePilot's own full-pack-first branch run on a subscription's first search.
+
+    MoviePilot already prefers a resource covering every target episode and falls
+    back to per-episode downloads when that fails (``policy.py`` 完整包分支),
+    but it skips the branch entirely unless the subscription is in per-episode
+    best-version mode, because ``build_full_pack_first_no_exists`` returns None
+    without ``best_version``. A subscription that has downloaded nothing yet
+    wants exactly that behaviour, so ask MoviePilot's own builder for the season
+    range and leave everything else — the coverage test, the priority gate, the
+    download and its fallback — to MoviePilot.
+    """
+    from dataclasses import replace
+
+    @wraps(original)
+    def build(subscribe, mediakey):
+        result = original(subscribe, mediakey)
+        if result is not None or not enabled():
+            return result
+        from app.application.subscription import priority as subscription_priority
+
+        if subscription_priority.is_full_best_version_enabled(subscribe):
+            return result
+        # 已经下过任何一集就不再介入，完全回到原生行为。
+        if subscription_priority.get_downloaded_best_version_episodes(subscribe):
+            return result
+        return original(replace(subscribe, best_version=1), mediakey)
+
+    return build
