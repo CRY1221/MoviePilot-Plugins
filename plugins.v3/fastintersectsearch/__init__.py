@@ -3,12 +3,14 @@ import math
 
 from app.sdk.plugin import _PluginBase
 from app.sdk.logging import logger
+from app.sdk.events import Event, eventmanager
+from app.schemas.types import ChainEventType
 
 
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
-    plugin_desc = "跨站并发、同站默认 3 秒；过滤、排序和订阅下载沿用 MP。"
-    plugin_version = "3.6.15"
+    plugin_desc = "跨站并发、同站默认 3 秒；规则与排序沿用 MP，订阅按集下载可收敛到同一制作组。"
+    plugin_version = "3.6.16"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -23,6 +25,8 @@ class FastIntersectSearch(_PluginBase):
         self._streaming = True
         self._max_pages = 1
         self._names = True
+        self._group_lock = True
+        self._group_lock_apply = None
         self._interval = 3.0
         self._status = "未启用"
         self._test_progress = None
@@ -44,6 +48,8 @@ class FastIntersectSearch(_PluginBase):
         except (TypeError, ValueError):
             self._max_pages = 1
         self._names = bool(config.get("bilingual_names", True))
+        self._group_lock = bool(config.get("single_group_download", True))
+        self._group_lock_apply = None
         if not config.get("enabled", False):
             return
         try:
@@ -52,7 +58,15 @@ class FastIntersectSearch(_PluginBase):
             if not math.isfinite(interval):
                 raise ValueError("站点间隔必须是有限数字")
             self._interval = max(1.0, interval)
+            from app.application.torrent.download import TorrentHelper
+            from app.chain.subscribe.facade import SubscribeChain
+            from app.schemas.types import MediaType
             from .compat import install
+            from .grouplock import make_group_lock
+            self._group_lock_apply = make_group_lock(
+                lambda: self.get_state() and self._group_lock,
+                TorrentHelper.sort_torrents, SubscribeChain.parse_subscribe_source_keyword,
+                MediaType.TV.value)
             self._hooks = install(self.get_state, lambda: self.get_state() and self._subscription,
                                   max(1.0, interval),
                                   lambda: self.get_state() and self._streaming,
@@ -65,6 +79,28 @@ class FastIntersectSearch(_PluginBase):
             self.stop_service()
             self._status = f"未启用：{type(error).__name__}，请查看兼容性日志"
             logger.error(f"极速搜索适配安装失败：{error}")
+
+    @eventmanager.register(ChainEventType.ResourceSelection)
+    def on_resource_selection(self, event: Event = None):
+        """把订阅下载的候选收敛到这一季该用的那一个制作组。
+
+        走 MP 自己的扩展点：`app/chain/download/selection.py` 会回读 `updated_contexts`。
+        不改规则、不改优先级、不改排序；认不出制作组的候选一律放行。
+        """
+        apply = self._group_lock_apply
+        data = getattr(event, "event_data", None)
+        if apply is None or data is None:
+            return
+        try:
+            narrowed = apply(getattr(data, "origin", None),
+                             list(getattr(data, "contexts", None) or []))
+        except Exception as error:
+            logger.warning(f"极速搜索制作组收敛失败，本轮不干预：{error}")
+            return
+        if narrowed is None:
+            return
+        data.updated = True
+        data.updated_contexts = narrowed
 
     def get_state(self):
         return self._enabled
@@ -96,12 +132,21 @@ class FastIntersectSearch(_PluginBase):
                 "model": "bilingual_names", "label": "中英搜索｜只用原名/中文名/英文名，替代 MP 的多别名展开"}},
             {"component": "VSwitch", "props": {
                 "model": "accelerate_new_subscribe", "label": "加速新订阅首次搜索｜并发预取各站待请求页"}},
+            {"component": "VSwitch", "props": {
+                "model": "single_group_download",
+                "label": "一季同组｜按集下载时只用一个制作组，不混组"
+                         "｜MP 本身按集补时会从多个制作组各取几集，一季拼成杂烩。"
+                         "开启后，订阅下载的候选会收敛到这一个组：已经下过的组优先，"
+                         "首轮则取 MP 排序最靠前的那个层级里、覆盖集数最多的组。"
+                         "认不出制作组的资源一律放行；某个组补不齐剩下的集时不会自动改用别的组。"}},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal"}, "text":
-             "过滤、匹配、排序和下载决策全部沿用 MP：本插件不改规则、不给整包加分、不复活被拒资源。"
-             "订阅尚无已下载集时，首次搜索会优先尝试整包；没有整包仍由 MP 自动回退按集下载。"
+             "过滤、匹配、排序沿用 MP 自己那套：本插件不改规则、不改优先级、不复活被拒资源。"
+             "订阅尚无已下载集时，首次搜索会优先尝试整包；没有整包由 MP 回退按集下载，"
+             "此时按集候选会按上一项收敛到同一个制作组（可关）。"
              "识别词较多时解析会自动改用 MP 自带的 Python 解析器，结果与走 Rust 一致，只是更快。"},
         ]}], {"enabled": False, "accelerate_new_subscribe": True, "site_sleep_seconds": 3,
-              "streaming_pipeline": True, "max_pages_per_site": 1, "bilingual_names": True}
+              "streaming_pipeline": True, "max_pages_per_site": 1, "bilingual_names": True,
+              "single_group_download": True}
 
     def get_page(self):
         """插件详情页：沿用旧版黑曜石玻璃拟态耗时大盘，数据取自本进程实时统计。"""

@@ -29,14 +29,15 @@ def host(monkeypatch):
         "chain.search.title", "chain.search.result", "chain.search.pagination",
         "chain.subscribe.searchtask", "chain.subscribe.facade", "application.torrent.download",
         "application.subscription.sitebudget", "sdk.plugin", "domain.metainfo",
-        "adapters.system.rust", "application.rules", "runtime.progress"]}
+        "adapters.system.rust", "application.rules", "runtime.progress", "schemas.types"]}
     targets = {
         "SearchChain": type("SearchChain", (), {}), "manual": modules["chain.search.manual"],
         "execution": modules["chain.search.execution"], "SearchScan": type("SearchScan", (), {}),
         "SearchSources": type("SearchSources", (), {}), "SearchTitleOwner": type("SearchTitleOwner", (), {}),
         "SubscriptionSearchTaskRunner": type("SubscriptionSearchTaskRunner", (), {}),
         "SearchPaginationOwner": type("SearchPaginationOwner", (), {}),
-        "SubscribeChain": type("SubscribeChain", (), {}),
+        "SubscribeChain": type("SubscribeChain", (), {
+            "parse_subscribe_source_keyword": staticmethod(lambda origin: None)}),
         "result": modules["chain.search.result"],
         "metainfo": modules["domain.metainfo"], "rust": modules["adapters.system.rust"],
         "RuleHelper": type("RuleHelper", (), {}), "ProgressHelper": type("ProgressHelper", (), {}),
@@ -72,6 +73,7 @@ def host(monkeypatch):
     modules["application.rules"].RuleHelper = targets["RuleHelper"]
     modules["runtime.progress"].ProgressHelper = targets["ProgressHelper"]
     modules["application.torrent.download"].TorrentHelper = NS(sort_torrents=lambda items: items)
+    modules["schemas.types"].MediaType = NS(TV=NS(value="电视剧"))
     modules["chain.search.result"].SearchResultOwner = targets["SearchResultOwner"]
     modules["chain.search.result"]._disambiguation_key = lambda meta: meta.title
     modules["domain.metainfo"]._rust_parse_options = lambda: {"_cache_key": "test"}
@@ -147,7 +149,9 @@ def plugin_class():
     tree = ast.parse((ROOT / "plugins.v3/fastintersectsearch/__init__.py").read_text(encoding="utf-8"))
     tree.body = [node for node in tree.body if isinstance(node, ast.ClassDef)]
     scope = {"__name__": "fastsearch", "__package__": "fastsearch", "math": math,
-             "_PluginBase": object, "logger": NS(error=lambda *_: None)}
+             "_PluginBase": object, "logger": NS(error=lambda *_: None),
+             "eventmanager": NS(register=lambda *args, **kwargs: (lambda handler: handler)),
+             "Event": object, "ChainEventType": NS(ResourceSelection="resource.selection")}
     exec(compile(tree, "plugin_entry", "exec"), scope)
     return scope["FastIntersectSearch"]
 
