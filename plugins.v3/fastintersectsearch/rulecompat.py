@@ -14,6 +14,7 @@ from .subscription import SUBSCRIPTION_SCOPE
 from .scheduling import is_music
 
 VALIDATION = ContextVar("fastsearch_rule_validation", default=None)
+VERIFY_FILTER = ContextVar("fastsearch_verify_filter", default=True)
 
 
 @lru_cache(maxsize=512)
@@ -81,7 +82,7 @@ def make_filter(original, enabled):
             rule_set = compatible_rules(rule_set)
         result = original(groups, torrent_list, rule_set, mediainfo, metainfo_options)
         validation = VALIDATION.get()
-        if validation is not None and result is not None:
+        if validation is not None and VERIFY_FILTER.get() and result is not None:
             from app.modules.filter import FilterModule
             module = FilterModule()
             module.rule_set = native_rules

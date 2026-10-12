@@ -38,6 +38,7 @@ def host(monkeypatch):
         "result": modules["chain.search.result"],
         "metainfo": modules["domain.metainfo"], "rust": modules["adapters.system.rust"],
         "RuleHelper": type("RuleHelper", (), {}), "ProgressHelper": type("ProgressHelper", (), {}),
+        "SearchResultOwner": type("SearchResultOwner", (), {}),
     }
     targets["execution"].SearchExecutionOwner = type("SearchExecutionOwner", (), {})
     targets["execution.SearchExecutionOwner"] = targets["execution"].SearchExecutionOwner
@@ -53,7 +54,7 @@ def host(monkeypatch):
         scope = {"__name__": "app.isolated_host"}
         exec(code, scope)
         function = scope[name]
-        if target is targets["execution.SearchExecutionOwner"]:
+        if target is targets["execution.SearchExecutionOwner"] or target is targets["SearchResultOwner"]:
             function = staticmethod(function)
         setattr(target, name, function)
     modules["chain.search.facade"].SearchChain = targets["SearchChain"]
@@ -68,8 +69,7 @@ def host(monkeypatch):
     modules["application.rules"].RuleHelper = targets["RuleHelper"]
     modules["runtime.progress"].ProgressHelper = targets["ProgressHelper"]
     modules["application.torrent.download"].TorrentHelper = NS(sort_torrents=lambda items: items)
-    modules["chain.search.result"].SearchResultOwner = type(
-        "SearchResultOwner", (), {"_remove_duplicate": staticmethod(lambda items: items)})
+    modules["chain.search.result"].SearchResultOwner = targets["SearchResultOwner"]
     modules["chain.search.result"]._disambiguation_key = lambda meta: meta.title
     modules["domain.metainfo"]._rust_parse_options = lambda: {"_cache_key": "test"}
     modules["domain.metainfo"].get_metainfo_accelerator = lambda: None
@@ -83,7 +83,7 @@ def test_install_and_restore_all_descriptors(monkeypatch):
     targets = host(monkeypatch)
     before = {key: dict(vars(target)) for key, target in targets.items()}
     hooks = compat.install(lambda: True, lambda: True, 5)
-    assert len(hooks.patches) == 25
+    assert len(hooks.patches) == 26
     hooks.close()
     for key, target in targets.items():
         assert vars(target) == before[key]
@@ -125,7 +125,7 @@ def test_reload_then_old_stop_does_not_unhook_new_instance(monkeypatch):
     assert not first.get_state() and second.get_state()
     first.stop_service()
     assert Plugin.get_instance() is second
-    assert len(second._hooks.patches) == 25
+    assert len(second._hooks.patches) == 26
     second.stop_service()
     assert Plugin.get_instance() is None
 

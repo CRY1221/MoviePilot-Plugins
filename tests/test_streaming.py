@@ -9,7 +9,8 @@ from types import ModuleType, SimpleNamespace as NS
 
 import pytest
 
-from fastsearch.streaming import ParsePool, make_page_events
+from fastsearch.streaming import ParsePool, make_page_events, make_dedup, parse_page, DEFER_DEDUP
+from conftest import native_nodes
 
 
 @dataclass
@@ -224,3 +225,27 @@ def test_same_source_pages_are_processed_early_and_merged_in_page_order(monkeypa
         assert [t.title for t in harness.manual.torrents] == ["first", "dup", "second", "dup"]
     finally:
         harness.pool.close()
+
+
+def test_defer_page_dedup_preserves_native_global_order_and_last_representative():
+    host = native_nodes("app/chain/search/result.py", {"SearchResultOwner"}, {"_SearchOwnerBase": object})["SearchResultOwner"]
+    native_dedup = host._remove_duplicate
+    host._remove_duplicate = staticmethod(make_dedup(native_dedup))
+    def context(title, seeders):
+        return NS(torrent_info=NS(site_name="site", title=title, description="", seeders=seeders),
+                  media_info_is_target=True)
+    first, other, last = context("duplicate", 100), context("other", 50), context("duplicate", 1)
+    sorter = lambda contexts: sorted(contexts, key=lambda c: c.torrent_info.seeders, reverse=True)
+    manual = NS(results=lambda items: host._remove_duplicate(sorter(items)))
+    native = manual.results([first, last, other])
+    assert native == [last, other]
+    # Dedup on each page would incorrectly put the unique resource first.
+    assert native_dedup(sorter(manual.results([first, last]) + manual.results([other]))) == [other, last]
+    pool = ParsePool(sorter=sorter, dedup=native_dedup)
+    try:
+        incremental = pool.merge([parse_page(manual, [first, last]), parse_page(manual, [other])])
+        assert incremental == native
+        assert not DEFER_DEDUP.get()
+        assert host._remove_duplicate([first, last]) == [last]
+    finally:
+        pool.close()

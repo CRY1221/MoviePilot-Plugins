@@ -12,10 +12,55 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import aclosing
 from contextvars import copy_context
+from contextvars import ContextVar
 from functools import wraps
 
 from .scheduling import is_music, AGGREGATE_PAGES
 from .rulecompat import VALIDATION
+
+DEFER_DEDUP = ContextVar("fastsearch_defer_page_dedup", default=False)
+LAST_COMPARISON = None
+
+
+def make_dedup(original):
+    @wraps(original)
+    def dedup(_torrents):
+        # Keep every successfully matched Context until the native final sort.
+        # Dedup before that sort loses an earlier duplicate's sort position.
+        return _torrents if DEFER_DEDUP.get() else original(_torrents)
+    return dedup
+
+
+def parse_page(manual, torrents):
+    token = DEFER_DEDUP.set(True)
+    try:
+        return manual.results(torrents)
+    finally:
+        DEFER_DEDUP.reset(token)
+
+
+def compare_contexts(incremental, native):
+    """Return field paths only; never return credentials or download URLs."""
+    left, right = [c.to_dict() for c in incremental], [c.to_dict() for c in native]
+    def identity(item):
+        torrent = item.get("torrent_info", {})
+        return tuple(torrent.get(k) for k in ("site_name", "title", "description"))
+    differences = []
+    def walk(a, b, path):
+        if a == b or len(differences) >= 30:
+            return
+        if isinstance(a, dict) and isinstance(b, dict):
+            for key in sorted(a.keys() | b.keys()):
+                walk(a.get(key), b.get(key), path + "." + key)
+        elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+            for index, (x, y) in enumerate(zip(a, b)):
+                walk(x, y, f"{path}[{index}]")
+        else:
+            differences.append(path)
+    walk(left, right, "contexts")
+    return {"equivalent": left == right, "same_order": list(map(identity, left)) == list(map(identity, right)),
+            "same_resources": set(map(identity, left)) == set(map(identity, right)),
+            "different_fields": differences}
 
 
 class ParsePool:
@@ -107,7 +152,7 @@ def make_page_events(original, enabled, pool):
                                     manual.torrents.extend(torrents)
                                     if torrents:
                                         batch_id = (key, facts.get("page", page))
-                                        pending[batch_id] = asyncio.create_task(pool.run(manual.results, torrents))
+                                        pending[batch_id] = asyncio.create_task(pool.run(parse_page, manual, torrents))
                                     next_page = asyncio.create_task(anext(pages))
                                     yield {"type": "progress", "stage": "searching",
                                            "value": len(facts_by_key) / len(manual.sources.queries) * 90,
@@ -143,6 +188,7 @@ def make_page_events(original, enabled, pool):
                     pool.merge, [batch for key in manual.sources.queries
                                  for _, batch in sorted(batches_by_key.get(key, {}).items())])
                 if VALIDATION.get() is not None:
+                    global LAST_COMPARISON
                     checks = VALIDATION.get()
                     token = VALIDATION.set(None)
                     try:
@@ -152,8 +198,9 @@ def make_page_events(original, enabled, pool):
                         baseline = await pool.run(manual.results, deepcopy(manual.torrents))
                     finally:
                         VALIDATION.reset(token)
+                    LAST_COMPARISON = (contexts, baseline)
                     checks.append({"kind": "final_merge", "candidates": len(manual.torrents),
-                                             "equivalent": [c.to_dict() for c in contexts] == [c.to_dict() for c in baseline],
+                                             **compare_contexts(contexts, baseline),
                                              "incremental_results": len(contexts), "native_results": len(baseline)})
                 if contexts:
                     break

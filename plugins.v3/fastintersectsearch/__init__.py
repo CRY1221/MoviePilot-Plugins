@@ -8,7 +8,7 @@ from app.sdk.logging import logger
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
     plugin_desc = "跨站并发、同站默认 3 秒；过滤、排序和订阅下载沿用 MP。"
-    plugin_version = "3.6.4"
+    plugin_version = "3.6.5"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -141,6 +141,7 @@ class FastIntersectSearch(_PluginBase):
         import sys
         import threading
         from pathlib import Path
+        from .streaming import LAST_COMPARISON, compare_contexts
         frames = sys._current_frames()
         workers = []
         for thread in threading.enumerate():
@@ -153,17 +154,20 @@ class FastIntersectSearch(_PluginBase):
                 frame = frame.f_back
             workers.append({"worker": thread.name, "stack": stack})
         return {"success": True, "data": {"progress": self._test_progress,
-                                           "last_result": self.get_data("last_selftest"), "workers": workers}}
+                                           "last_result": self.get_data("last_selftest"), "workers": workers,
+                                           "last_comparison": compare_contexts(*LAST_COMPARISON) if LAST_COMPARISON else None}}
 
     async def api_selftest(self, media_id: str = "758891", mtype: str = "电影",
-                           media_source: str = "themoviedb", site_id: int | None = None, verify: bool = False):
+                           media_source: str = "themoviedb", site_id: int | None = None, verify: bool = False,
+                           verify_filter: bool = True):
         """自检：跑一次搜索，并给出这次搜索新增的站点请求统计。"""
         from . import selftest
         from .scheduling import SHARED_GATE
         before = {item["site"]: item["requests"] for item in SHARED_GATE.snapshot()}
-        from .rulecompat import VALIDATION
+        from .rulecompat import VALIDATION, VERIFY_FILTER
         checks = [] if verify else None
         token = VALIDATION.set(checks)
+        filter_token = VERIFY_FILTER.set(verify_filter)
         self._test_progress = {"status": "running"}
         try:
             result = await selftest.run_search(media_id=media_id, mtype=mtype, media_source=media_source, site_id=site_id,
@@ -173,6 +177,7 @@ class FastIntersectSearch(_PluginBase):
             raise
         finally:
             VALIDATION.reset(token)
+            VERIFY_FILTER.reset(filter_token)
         if checks is not None:
             result["validation"] = checks
             result["equivalent"] = bool(checks) and all(check["equivalent"] for check in checks)
