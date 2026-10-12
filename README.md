@@ -21,6 +21,8 @@ MoviePilot V3 搜索调度插件。加速网页、TG 等通知渠道、智能助
 | `enabled` | 默认关闭；启用前核验宿主接口，失败则不安装调度适配 |
 | `accelerate_new_subscribe` | 默认开启，限真实首订任务及其续跑 |
 | `site_sleep_seconds` | 默认 3 秒，从上次请求**结束**时刻起算；不改动 MP 的站点配置 |
+| `streaming_pipeline` | 默认开启：过滤/匹配与抓取重叠执行；关闭后恢复 MP 原生的"抓完再处理" |
+| `max_pages_per_site` | 每站每关键词最多翻页数，默认 10（1-20）；空页或出错自动停止 |
 | `bilingual_search` | 不再单独控制；关键词与别名遵循 MP 系统配置 |
 | `search_timeout` | 不再独立截断；请求超时由 MP 管理，取消时等待真实请求收尾 |
 | `default_top_k` | 不再全局裁剪；工具参数 `top_k` 仅裁剪最终展示，0 表示全部 |

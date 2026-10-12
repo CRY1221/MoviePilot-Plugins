@@ -22,8 +22,9 @@ def require(target, name, parameters, kind="sync"):
     return function
 
 
-def install(enabled, subscription_enabled, interval, streaming_enabled=None):
+def install(enabled, subscription_enabled, interval, streaming_enabled=None, max_pages=None):
     streaming_enabled = streaming_enabled or enabled
+    max_pages = max_pages or (lambda: 1)
     from app.chain.search.facade import SearchChain
     from app.chain.search import manual, execution
     from app.chain.search.scan import SearchScan, SearchSources, AUTOMATIC_REQUEST_INTERVAL
@@ -84,7 +85,7 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None):
     patches = [
         (SearchChain, "search_site_torrents", make_site_sync(sync, SHARED_GATE, enabled, minimum_interval)),
         (SearchChain, "async_search_site_torrents", make_site_async(asynchronous, SHARED_GATE, enabled, minimum_interval)),
-        (manual, "_read_pages", make_read_pages(read, manual._offload, enabled)),
+        (manual, "_read_pages", make_read_pages(read, manual._offload, enabled, max_pages)),
         (manual, "_page_events", make_page_events(page_events, streaming_enabled, parse_pool)),
         (execution.SearchExecutionOwner, "run", staticmethod(make_execution_run(run, enabled, no_plugin_sources))),
         (execution.SearchExecutionOwner, "events", staticmethod(make_execution_events(events, enabled, no_plugin_sources))),

@@ -242,3 +242,86 @@ def test_music_bypasses_gate_and_errors_release_slot():
     assert call(None, {"id": 1}, "concert", mtype="电影") == "concert"
     stats = gate.snapshot()
     assert stats[0]["requests"] == 2 and stats[0]["errors"] == 1
+
+
+class FakeTorrent:
+    def __init__(self, name):
+        self.site_name, self.title, self.description = "site", name, name
+
+
+class PageOwner:
+    """Minimal stand-in for the native per-page scheduler used by _read_pages."""
+    async def _iter_site_page_results(self, *, indexer_sites, search_pages, search_page,
+                                      should_continue, task_owner):
+        for site in indexer_sites:
+            index = 0
+            while True:
+                results = await search_page(site, search_pages[index])
+                yield site, search_pages[index], results, False, 0.0
+                if not should_continue(site, results) or index + 1 >= len(search_pages):
+                    break
+                index += 1
+
+
+def paged_manual(pages, pageable=True):
+    manual = NS(plan=NS(mediainfo=NS(type="电影")), owner=PageOwner(), torrents=[])
+    manual.queries = {"1:alpha": {"site": "1", "keyword": "alpha"}}
+    manual.sources = NS(queries=manual.queries, pageable=lambda key: pageable)
+    manual.calls = []
+    def read(key, page):
+        manual.calls.append(page)
+        torrents = [FakeTorrent(name) for name in pages.get(page, [])]
+        return ({"source": "1:alpha:sid", "page": page, "error": None,
+                 "can_continue": bool(torrents)}, torrents)
+    manual.read = read
+    return manual
+
+
+async def collect(wrapper, manual, keys, page=0):
+    out = []
+    async with aclosing(wrapper(manual, keys, page)) as stream:
+        async for key, facts, torrents in stream:
+            out.append((key, facts, torrents))
+    return out
+
+
+def test_site_pages_are_walked_until_the_site_runs_out():
+    async def offload(operation, *args):
+        return operation(*args)
+    manual = paged_manual({0: ["a", "b"], 1: ["c"], 2: []})
+    wrapper = make_read_pages(lambda *_: None, offload, lambda: True, lambda: 10)
+    result = asyncio.run(collect(wrapper, manual, ["1:alpha"]))
+    key, facts, torrents = result[0]
+    assert manual.calls == [0, 1, 2]
+    assert [item.title for item in torrents] == ["a", "b", "c"]
+    assert facts["page"] == 1  # last page that had data
+
+
+def test_page_cap_and_duplicates_are_respected():
+    async def offload(operation, *args):
+        return operation(*args)
+    manual = paged_manual({0: ["a"], 1: ["a", "b"], 2: ["c"]})
+    wrapper = make_read_pages(lambda *_: None, offload, lambda: True, lambda: 2)
+    result = asyncio.run(collect(wrapper, manual, ["1:alpha"]))
+    assert manual.calls == [0, 1]
+    assert [item.title for item in result[0][2]] == ["a", "b"]
+
+
+def test_non_pageable_site_and_errors_stop_the_walk():
+    async def offload(operation, *args):
+        return operation(*args)
+    manual = paged_manual({0: ["a"], 1: ["b"]}, pageable=False)
+    wrapper = make_read_pages(lambda *_: None, offload, lambda: True, lambda: 10)
+    asyncio.run(collect(wrapper, manual, ["1:alpha"]))
+    assert manual.calls == [0]
+
+    manual = paged_manual({0: ["a"]})
+    def failing_read(key, page):
+        manual.calls.append(page)
+        if page == 0:
+            return {"source": "s", "page": 0, "error": None, "can_continue": True}, [FakeTorrent("a")]
+        return {"source": "s", "page": 1, "error": "site error", "can_continue": True}, []
+    manual.read = failing_read
+    wrapper = make_read_pages(lambda *_: None, offload, lambda: True, lambda: 10)
+    asyncio.run(collect(wrapper, manual, ["1:alpha"]))
+    assert manual.calls == [0, 1]

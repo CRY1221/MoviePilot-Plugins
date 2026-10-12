@@ -148,7 +148,13 @@ def make_site_async(original, gate, enabled, minimum_interval=lambda owner: 0):
     return call
 
 
-def make_read_pages(original, offload, enabled):
+def resource_key(torrent):
+    """Same identity MP uses for search de-duplication: site + title + description."""
+    return (getattr(torrent, "site_name", None), getattr(torrent, "title", None),
+            getattr(torrent, "description", None))
+
+
+def make_read_pages(original, offload, enabled, max_pages=lambda: 1):
     @wraps(original)
     async def read_pages(manual, keys, page):
         if not enabled() or is_music(getattr(manual.plan.mediainfo, "type", None)):
@@ -165,6 +171,21 @@ def make_read_pages(original, offload, enabled):
         async def read_source(site, requested_page):
             key = site["keys"].popleft()
             facts, torrents = await offload(manual.read, key, requested_page)
+            # Walk the rest of this keyword's pages on that site until the site
+            # runs out, an error shows up, or the configured cap is reached.
+            cap = requested_page + max(1, int(max_pages())) - 1
+            seen = {resource_key(torrent) for torrent in torrents}
+            while (facts.get("can_continue") and facts.get("page", requested_page) < cap
+                   and manual.sources.pageable(key)):
+                next_facts, next_torrents = await offload(manual.read, key, facts["page"] + 1)
+                if next_facts.get("error") or not next_torrents:
+                    break
+                for torrent in next_torrents:
+                    identity = resource_key(torrent)
+                    if identity not in seen:
+                        seen.add(identity)
+                        torrents.append(torrent)
+                facts = next_facts
             return [(key, facts, torrents)]
 
         pages = manual.owner._iter_site_page_results(
