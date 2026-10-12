@@ -8,7 +8,7 @@ from app.sdk.logging import logger
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
     plugin_desc = "跨站并发、同站默认 3 秒；过滤、排序和订阅下载沿用 MP。"
-    plugin_version = "3.6.14"
+    plugin_version = "3.6.15"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -81,13 +81,25 @@ class FastIntersectSearch(_PluginBase):
     def get_form(self):
         return [{"component": "VForm", "content": [
             {"component": "VSwitch", "props": {"model": "enabled", "label": "启用极速搜索"}},
-            {"component": "VSwitch", "props": {"model": "accelerate_new_subscribe", "label": "加速新订阅首次搜索"}},
-            {"component": "VTextField", "props": {"model": "site_sleep_seconds", "label": "同站请求间隔（秒，从上次请求结束算起）", "type": "number", "min": 1}},
-            {"component": "VSwitch", "props": {"model": "streaming_pipeline", "label": "边抓边洗（结果解析与抓取重叠）"}},
-            {"component": "VSwitch", "props": {"model": "bilingual_names", "label": "中英搜索（只用原名/中文名/英文名，替代 MP 多名称展开）"}},
-            {"component": "VTextField", "props": {"model": "max_pages_per_site", "label": "每站最多抓取页数（1-20，默认 1 即只搜首页；按 ID 和按关键词搜索都生效）", "type": "number", "min": 1, "max": 20}},
+            {"component": "VTextField", "props": {
+                "model": "max_pages_per_site", "type": "number", "min": 1, "max": 20,
+                "label": "每站最多抓取页数（1-20）"
+                         "｜默认 1，即只搜首页。调大能翻到更多资源，代价是更慢、对站点请求更多；"
+                         "站点没有更多结果时会自动停，不会空抓。按 ID 与按关键词搜索都按这个值抓。"}},
+            {"component": "VTextField", "props": {
+                "model": "site_sleep_seconds", "type": "number", "min": 1,
+                "label": "同站请求间隔（秒，从上次请求结束算起）"
+                         "｜默认 3。调小会更快，但更容易被站点限流或临时封禁。"}},
+            {"component": "VSwitch", "props": {
+                "model": "streaming_pipeline", "label": "边抓边洗｜每站结果一到就解析，不等所有站点抓完"}},
+            {"component": "VSwitch", "props": {
+                "model": "bilingual_names", "label": "中英搜索｜只用原名/中文名/英文名，替代 MP 的多别名展开"}},
+            {"component": "VSwitch", "props": {
+                "model": "accelerate_new_subscribe", "label": "加速新订阅首次搜索｜并发预取各站待请求页"}},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal"}, "text":
-             "各站独立并发；解析与抓取重叠以缩短收尾等待。过滤、匹配、排序与下载决策仍由 MP 执行；保留 MP 更严格的站点与订阅限制。旧版双语、搜索超时、全集参数不再单独生效。"},
+             "过滤、匹配、排序和下载决策全部沿用 MP：本插件不改规则、不给整包加分、不复活被拒资源。"
+             "订阅尚无已下载集时，首次搜索会优先尝试整包；没有整包仍由 MP 自动回退按集下载。"
+             "识别词较多时解析会自动改用 MP 自带的 Python 解析器，结果与走 Rust 一致，只是更快。"},
         ]}], {"enabled": False, "accelerate_new_subscribe": True, "site_sleep_seconds": 3,
               "streaming_pipeline": True, "max_pages_per_site": 1, "bilingual_names": True}
 
