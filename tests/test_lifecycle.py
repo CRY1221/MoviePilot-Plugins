@@ -74,7 +74,7 @@ def test_install_and_restore_all_descriptors(monkeypatch):
     targets = host(monkeypatch)
     before = {key: dict(vars(target)) for key, target in targets.items()}
     hooks = compat.install(lambda: True, lambda: True, 5)
-    assert len(hooks.patches) == 13
+    assert len(hooks.patches) == 14
     hooks.close()
     for key, target in targets.items():
         assert vars(target) == before[key]
@@ -116,7 +116,7 @@ def test_reload_then_old_stop_does_not_unhook_new_instance(monkeypatch):
     assert not first.get_state() and second.get_state()
     first.stop_service()
     assert Plugin.get_instance() is second
-    assert len(second._hooks.patches) == 13
+    assert len(second._hooks.patches) == 14
     second.stop_service()
     assert Plugin.get_instance() is None
 

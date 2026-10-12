@@ -11,6 +11,7 @@ from .scheduling import (
 from .subscription import make_owned_task, make_advance_sources
 from .presentation import make_title_stream
 from .streaming import ParsePool, make_page_events
+from .names import make_prepare_params
 
 
 def require(target, name, parameters, kind="sync"):
@@ -23,9 +24,11 @@ def require(target, name, parameters, kind="sync"):
     return function
 
 
-def install(enabled, subscription_enabled, interval, streaming_enabled=None, max_pages=None):
+def install(enabled, subscription_enabled, interval, streaming_enabled=None, max_pages=None,
+            names_enabled=None):
     streaming_enabled = streaming_enabled or enabled
     max_pages = max_pages or (lambda: 1)
+    names_enabled = names_enabled or enabled
     from app.chain.search.facade import SearchChain
     from app.chain.search import manual, execution
     from app.chain.search.scan import SearchScan, SearchSources, AUTOMATIC_REQUEST_INTERVAL
@@ -62,6 +65,8 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
     from app.chain.search.pagination import SearchPaginationOwner
     resource_pages = require(SearchPaginationOwner, "_get_search_resource_pages", "")
     facade_resource_pages = require(SearchChain, "_get_search_resource_pages", "")
+    prepare_params = require(SearchChain, "_prepare_params",
+                             "mediainfo keyword no_exists include_candidates")
     advance = require(SearchScan, "_advance_sources", "self keys submit started")
     require(SearchScan, "run", "self submit")
     require(SearchScan, "step", "self key")
@@ -98,6 +103,8 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
          staticmethod(make_resource_pages(resource_pages, enabled, max_pages))),
         (SearchChain, "_get_search_resource_pages",
          staticmethod(make_resource_pages(facade_resource_pages, enabled, max_pages))),
+        (SearchChain, "_prepare_params",
+         staticmethod(make_prepare_params(prepare_params, names_enabled))),
         (SearchScan, "_advance_sources", make_advance_sources(advance, subscription_enabled)),
         (SubscriptionSearchTaskRunner, "_execute_owned_task", make_owned_task(owned, subscription_enabled)),
         (SearchTitleOwner, "_resolve_title_request", sorted_title),
