@@ -68,7 +68,7 @@ def resolve_mtype(value):
     return None
 
 
-async def run_search(media_id, mtype=None, media_source="themoviedb", site_id=None):
+async def run_search(media_id, mtype=None, media_source="themoviedb", site_id=None, observe=None):
     """Drive one Web page search and collect timing, counts and stage marks."""
     from app.chain.search.facade import SearchChain
     from app.adapters.system import rust
@@ -86,6 +86,10 @@ async def run_search(media_id, mtype=None, media_source="themoviedb", site_id=No
     async with aclosing(chain.search_page_events(params=params)) as events:
         async for event in events:
             kind = event.get("type")
+            if observe is not None:
+                observe({"type": kind, "stage": event.get("stage"),
+                         "at": round(time.monotonic() - started, 2),
+                         "candidates": event.get("candidate_items")})
             if "recognition_cache" in event:
                 recognition_cache = event["recognition_cache"]
             if "candidate_items" in event:

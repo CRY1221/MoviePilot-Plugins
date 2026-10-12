@@ -10,6 +10,8 @@ from copy import deepcopy
 from functools import lru_cache, wraps
 
 from .recognition import ACTIVE
+from .subscription import SUBSCRIPTION_SCOPE
+from .scheduling import is_music
 
 VALIDATION = ContextVar("fastsearch_rule_validation", default=None)
 
@@ -74,7 +76,8 @@ def make_filter(original, enabled):
     @wraps(original)
     def call(groups, torrent_list, rule_set, mediainfo=None, metainfo_options=None):
         native_rules = rule_set
-        if enabled() and ACTIVE.get() is not None:
+        if (enabled() and (ACTIVE.get() is not None or SUBSCRIPTION_SCOPE.get() is not None)
+                and not is_music(getattr(mediainfo, "type", None))):
             rule_set = compatible_rules(rule_set)
         result = original(groups, torrent_list, rule_set, mediainfo, metainfo_options)
         validation = VALIDATION.get()

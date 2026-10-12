@@ -8,7 +8,7 @@ from app.sdk.logging import logger
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
     plugin_desc = "跨站并发、同站默认 3 秒；过滤、排序和订阅下载沿用 MP。"
-    plugin_version = "3.6.3"
+    plugin_version = "3.6.4"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -25,6 +25,7 @@ class FastIntersectSearch(_PluginBase):
         self._names = True
         self._interval = 3.0
         self._status = "未启用"
+        self._test_progress = None
 
     @classmethod
     def get_instance(cls):
@@ -128,11 +129,31 @@ class FastIntersectSearch(_PluginBase):
             "summary": "极速搜索自检",
             "description": "在容器进程内执行一次网页搜索，返回耗时、候选/结果数量与各站点请求次数。",
         }, {"path": "/rulecheck", "endpoint": self.api_rulecheck,
-            "methods": ["GET"], "auth": "apikey", "summary": "规则兼容性只读自检"}]
+            "methods": ["GET"], "auth": "apikey", "summary": "规则兼容性只读自检"},
+            {"path": "/diagnostics", "endpoint": self.api_diagnostics,
+             "methods": ["GET"], "auth": "apikey", "summary": "自检进度与解析线程状态"}]
 
     def api_rulecheck(self):
         from .selftest import check_rules
         return check_rules()
+
+    def api_diagnostics(self):
+        import sys
+        import threading
+        from pathlib import Path
+        frames = sys._current_frames()
+        workers = []
+        for thread in threading.enumerate():
+            if not thread.name.startswith("fastsearch-"):
+                continue
+            frame, stack = frames.get(thread.ident), []
+            while frame is not None and len(stack) < 12:
+                stack.append({"file": Path(frame.f_code.co_filename).name,
+                              "function": frame.f_code.co_name, "line": frame.f_lineno})
+                frame = frame.f_back
+            workers.append({"worker": thread.name, "stack": stack})
+        return {"success": True, "data": {"progress": self._test_progress,
+                                           "last_result": self.get_data("last_selftest"), "workers": workers}}
 
     async def api_selftest(self, media_id: str = "758891", mtype: str = "电影",
                            media_source: str = "themoviedb", site_id: int | None = None, verify: bool = False):
@@ -143,8 +164,13 @@ class FastIntersectSearch(_PluginBase):
         from .rulecompat import VALIDATION
         checks = [] if verify else None
         token = VALIDATION.set(checks)
+        self._test_progress = {"status": "running"}
         try:
-            result = await selftest.run_search(media_id=media_id, mtype=mtype, media_source=media_source, site_id=site_id)
+            result = await selftest.run_search(media_id=media_id, mtype=mtype, media_source=media_source, site_id=site_id,
+                                              observe=lambda event: setattr(self, "_test_progress", {"status": "running", **event}))
+        except BaseException as error:
+            self._test_progress = {"status": "failed", "error": type(error).__name__}
+            raise
         finally:
             VALIDATION.reset(token)
         if checks is not None:
@@ -155,4 +181,7 @@ class FastIntersectSearch(_PluginBase):
             for item in SHARED_GATE.snapshot()
             if item["requests"] - before.get(item["site"], 0) > 0
         ]
-        return {"success": result["status"] == "complete", "data": result}
+        response = {"success": result["status"] == "complete" and result.get("equivalent", True), "data": result}
+        self.save_data("last_selftest", response)
+        self._test_progress = {"status": result["status"]}
+        return response

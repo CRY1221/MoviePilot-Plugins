@@ -141,11 +141,12 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
          staticmethod(make_prepare_params(prepare_params, names_enabled))),
         (SearchScan, "_advance_sources", make_advance_sources(advance, subscription_enabled)),
         (SubscriptionSearchTaskRunner, "_execute_owned_task", make_owned_task(owned, subscription_enabled)),
-        (SearchTitleOwner, "_resolve_title_request", sorted_title),
-        (SearchTitleOwner, "async_search_by_title_stream", make_title_stream(
+        (SearchTitleOwner, "_resolve_title_request", make_scope(sorted_title, enabled, is_music)),
+        (SearchTitleOwner, "async_search_by_title_stream", make_scope(make_title_stream(
             title_stream, enabled, title._build_title_search_params, title._build_title_contexts,
             manual._offload, TorrentHelper.sort_torrents,
-            lambda: title.get_configured_system_config().get(title.SystemConfigKey.SearchFilterRuleGroups) or [])),
+            lambda: title.get_configured_system_config().get(title.SystemConfigKey.SearchFilterRuleGroups) or []),
+            enabled, is_music, generator=True)),
     ]
     hooks = Hooks()
     hooks.add_closer(parse_pool.close)

@@ -206,7 +206,10 @@ def make_scope(original, enabled, is_music, generator=False):
         plan = values.get("plan")
         if plan is not None:
             media = plan.mediainfo
-        return enabled() and not is_music(getattr(media, "type", None))
+        mtype = getattr(media, "type", values.get("mtype"))
+        if values.get("request") is not None:
+            mtype = values["request"].mtype
+        return enabled() and not is_music(mtype)
 
     if not generator:
         @wraps(original)
