@@ -20,6 +20,7 @@ def test_all_installed_hook_signatures_match_pinned_native_source():
                      "app/chain/search/scan.py", "app/chain/subscribe/searchtask.py", "app/chain/search/title.py",
                          "app/chain/search/facade.py", "app/chain/search/pagination.py",
                          "app/chain/search/plan.py", "app/chain/search/result.py",
+                         "app/chain/search/provider.py",
                          "app/adapters/system/rust.py", "app/domain/metainfo.py",
                          "app/application/rules.py", "app/runtime/progress.py"]:
         tree = ast.parse((KERNEL / relative).read_text(encoding="utf-8"))
@@ -32,8 +33,13 @@ def test_all_installed_hook_signatures_match_pinned_native_source():
         if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name) or call.func.id != "require":
             continue
         name, arguments = call.args[1].value, call.args[2].value.split()
-        matching = [node for node in definitions[name] if [a.arg for a in
+        def matches(candidate):
+            return [node for node in definitions.get(candidate, []) if [a.arg for a in
                     [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]] == arguments]
+        # facade publishes provider owners under a mangled alias, e.g.
+        # _SearchChain__search_all_sites = SearchProviderOwner._search_all_sites,
+        # so the patched name never appears as a definition of its own.
+        matching = matches(name) or matches("_" + name.split("__", 1)[1]) if "__" in name else matches(name)
         assert matching, name
         expected = call.args[3].value if len(call.args) > 3 else "sync"
         node = matching[0]
@@ -42,7 +48,7 @@ def test_all_installed_hook_signatures_match_pinned_native_source():
             actual = "generator" if any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(node)) else "async"
         assert actual == expected, name
         checked.append(name)
-    assert len(checked) == 34
+    assert len(checked) == 36
 
 
 def test_compatibility_rejects_unknown_or_wrapped_hooks():

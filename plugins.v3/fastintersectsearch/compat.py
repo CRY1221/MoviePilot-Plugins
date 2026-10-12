@@ -6,7 +6,7 @@ from .hooks import Hooks
 from .scheduling import (
     SHARED_GATE, is_music, make_site_sync, make_site_async, make_read_pages,
     make_execution_run, make_execution_events, make_keyword_delay,
-    make_resource_pages,
+    make_resource_pages, make_title_scope,
 )
 from .subscription import make_owned_task, make_advance_sources
 from .presentation import make_title_stream
@@ -66,6 +66,10 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
 
     sync = require(SearchChain, "search_site_torrents", "self site keyword mtype page")
     asynchronous = require(SearchChain, "async_search_site_torrents", "self site keyword mtype page", "async")
+    all_sites = require(SearchChain, "_SearchChain__search_all_sites",
+                        "self keyword mediainfo sites page area mtype")
+    async_all_sites = require(SearchChain, "_SearchChain__async_search_all_sites",
+                              "self keyword mediainfo sites page area mtype", "async")
     read = require(manual, "_read_pages", "manual keys page", "generator")
     page_events = require(manual, "_page_events", "manual params", "generator")
     torrent_meta = require(result, "_torrent_meta", "torrent custom_words mediainfo")
@@ -152,6 +156,9 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
          staticmethod(make_resource_pages(facade_resource_pages, enabled, max_pages))),
         (SearchChain, "_prepare_params",
          staticmethod(make_prepare_params(prepare_params, names_enabled))),
+        (SearchChain, "_SearchChain__search_all_sites", make_title_scope(all_sites, enabled)),
+        (SearchChain, "_SearchChain__async_search_all_sites",
+         make_title_scope(async_all_sites, enabled, asynchronous=True)),
         (SearchScan, "_advance_sources", make_advance_sources(advance, subscription_enabled)),
         (SubscriptionSearchTaskRunner, "_execute_owned_task", make_owned_task(owned, subscription_enabled)),
         (SearchTitleOwner, "_resolve_title_request", make_scope(sorted_title, enabled, is_music)),

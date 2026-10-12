@@ -11,7 +11,7 @@ from conftest import native_nodes
 from fastsearch.hooks import Hooks
 from fastsearch.scheduling import (SiteRequestGate, make_site_sync, make_site_async,
     make_read_pages, make_execution_run, make_execution_events, make_keyword_delay,
-    make_resource_pages, SEARCH_SCOPE)
+    make_resource_pages, make_title_scope, SEARCH_SCOPE)
 
 
 def test_binding_inheritance_and_third_party_ownership():
@@ -366,3 +366,58 @@ def test_disabled_streaming_aggregates_without_losing_pages():
     assert len(result) == 1
     assert [t.title for t in result[0][2]] == ["a", "b"]
     assert result[0][1]["page"] == 2
+
+
+def title_probe(seen, asynchronous=False):
+    if asynchronous:
+        async def original(self, keyword, mediainfo=None, sites=None, page=0, area="title", mtype=None):
+            seen.append(SEARCH_SCOPE.get())
+            return ["ok"]
+    else:
+        def original(self, keyword, mediainfo=None, sites=None, page=0, area="title", mtype=None):
+            seen.append(SEARCH_SCOPE.get())
+            return ["ok"]
+    return original
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_title_search_publishes_and_clears_the_page_budget_scope(asynchronous):
+    seen = []
+    scoped = make_title_scope(title_probe(seen, asynchronous), lambda: True, asynchronous)
+    owner, media = object(), NS(type=NS(value="电视剧"))
+    result = asyncio.run(scoped(owner, "kw", mediainfo=media)) if asynchronous else scoped(owner, "kw", mediainfo=media)
+    assert result == ["ok"]
+    assert seen == [owner]
+    assert SEARCH_SCOPE.get() is None
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_title_scope_stays_off_for_music_and_disabled(asynchronous):
+    seen = []
+    scoped = make_title_scope(title_probe(seen, asynchronous), lambda: True, asynchronous)
+    music, disabled = NS(type=NS(value="音乐")), make_title_scope(
+        title_probe(seen, asynchronous), lambda: False, asynchronous)
+    calls = [
+        (scoped, {"mtype": music.type}),
+        (disabled, {"mediainfo": NS(type=NS(value="电视剧"))}),
+    ]
+    for function, kwargs in calls:
+        if asynchronous:
+            asyncio.run(function(object(), "kw", **kwargs))
+        else:
+            function(object(), "kw", **kwargs)
+    assert seen == [None, None]
+
+
+def test_title_scope_prefers_explicit_mtype_and_keeps_arguments():
+    seen, passed = [], []
+    def original(self, keyword, mediainfo=None, sites=None, page=0, area="title", mtype=None):
+        seen.append(SEARCH_SCOPE.get())
+        passed.append((keyword, mediainfo, sites, page, area, mtype))
+        return "ok"
+    scoped = make_title_scope(original, lambda: True)
+    owner = object()
+    assert scoped(owner, "kw", mediainfo=NS(type=NS(value="电视剧")), sites=[7], page=2,
+                  area="imdbid", mtype=NS(value="电影")) == "ok"
+    assert seen == [owner]
+    assert passed == [("kw", NS(type=NS(value="电视剧")), [7], 2, "imdbid", NS(value="电影"))]

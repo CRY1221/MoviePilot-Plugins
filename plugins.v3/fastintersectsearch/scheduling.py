@@ -1,5 +1,6 @@
 """Search I/O scheduling; no matching, rule selection or download policy."""
 import asyncio
+import inspect
 import threading
 import time
 from collections import deque
@@ -243,6 +244,42 @@ def make_keyword_delay(original, enabled):
     def delay(owner, search_count):
         return 0 if enabled() and SEARCH_SCOPE.get() is owner else original(owner, search_count)
     return delay
+
+
+def make_title_scope(original, enabled, asynchronous=False):
+    """Give title search the page budget the id search path already has.
+
+    SEARCH_SCOPE is published by the execution owners, so callers that reach the
+    provider directly — the agent's search.title tool, the workflow action and
+    the non-streaming title endpoint — kept the native page count. The page list
+    is built at the top of this call, so publishing the scope here covers every
+    title-search variant at one point, without touching the native policy.
+    """
+    signature = inspect.signature(original)
+
+    def scope(owner, args, kwargs):
+        values = signature.bind(owner, *args, **kwargs).arguments
+        mtype = values.get("mtype") or getattr(values.get("mediainfo"), "type", None)
+        return owner if enabled() and not is_music(mtype) else None
+
+    if asynchronous:
+        @wraps(original)
+        async def scoped(owner, *args, **kwargs):
+            token = SEARCH_SCOPE.set(scope(owner, args, kwargs))
+            try:
+                return await original(owner, *args, **kwargs)
+            finally:
+                SEARCH_SCOPE.reset(token)
+        return scoped
+
+    @wraps(original)
+    def scoped(owner, *args, **kwargs):
+        token = SEARCH_SCOPE.set(scope(owner, args, kwargs))
+        try:
+            return original(owner, *args, **kwargs)
+        finally:
+            SEARCH_SCOPE.reset(token)
+    return scoped
 
 
 def make_resource_pages(original, enabled, max_pages):
