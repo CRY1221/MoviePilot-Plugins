@@ -170,7 +170,7 @@ def make_read_pages(original, offload, enabled, max_pages=lambda: 1):
             # runs out, an error shows up, or the configured cap is reached.
             # 不做本地去重：MP 的规则链与 _remove_duplicate 会处理重复资源。
             cap = requested_page + max(1, int(max_pages())) - 1
-            while (facts.get("can_continue") and facts.get("page", requested_page) < cap
+            while (not facts.get("error") and facts.get("can_continue") and facts.get("page", requested_page) < cap
                    and manual.sources.pageable(key)):
                 next_facts, next_torrents = await offload(manual.read, key, facts["page"] + 1)
                 page_facts.append(dict(next_facts))

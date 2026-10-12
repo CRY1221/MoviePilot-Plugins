@@ -331,6 +331,20 @@ def test_non_pageable_site_and_errors_stop_the_walk():
     assert manual.calls == [0, 1]
 
 
+def test_failed_first_page_does_not_advance_or_hide_failure():
+    async def offload(operation, *args):
+        return operation(*args)
+    manual = paged_manual({})
+    def failing_read(key, page):
+        manual.calls.append(page)
+        return {"page": page, "error": "timeout", "can_continue": True}, []
+    manual.read = failing_read
+    wrapper = make_read_pages(lambda *_: None, offload, lambda: True, lambda: 10)
+    result = asyncio.run(collect(wrapper, manual, ["1:alpha"]))
+    assert manual.calls == [0]
+    assert result[0][1]["error"] == "timeout" and result[0][1]["page"] == 0
+
+
 def test_resource_pages_only_override_inside_a_media_search():
     wrapper = make_resource_pages(lambda: 3, lambda: True, lambda: 10)
     assert wrapper() == 3                      # outside a媒体搜索: MP's own value
