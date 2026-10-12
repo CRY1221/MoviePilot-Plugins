@@ -68,10 +68,20 @@ def resolve_mtype(value):
     return None
 
 
-async def run_search(media_id, mtype=None, media_source="themoviedb", site_id=None, observe=None):
+def rust_trace_state():
+    """Whether the native Rust adapter is on its with_trace branch for this run."""
+    from app.adapters.system import rust
+    return {"debug_log_enabled": bool(rust.is_debug_log_enabled()),
+            "trace_api_available": hasattr(rust._moviepilot_rust, "filter_torrents_with_trace_fast")}
+
+
+async def run_search(media_id, mtype=None, media_source="themoviedb", site_id=None, observe=None,
+                     collect=False):
     """Drive one Web page search and collect timing, counts and stage marks."""
     from app.chain.search.facade import SearchChain
     from app.adapters.system import rust
+    from .cassette import mask_contexts
+    from .streaming import pool_delta, pool_snapshot
 
     chain = SearchChain()
     params = {"media_source": media_source, "media_id": str(media_id),
@@ -79,10 +89,10 @@ async def run_search(media_id, mtype=None, media_source="themoviedb", site_id=No
     if site_id is not None:
         params["sites"] = [site_id]
     started = time.monotonic()
+    pool_before = pool_snapshot()
     marks, state = [], {"appends": 0, "candidates": 0, "results": 0, "sources": 0}
     complete, failed, source_facts = False, False, []
-    first_matched = None
-    recognition_cache = None
+    first_matched, items, recognition_cache = None, [], None
     async with aclosing(chain.search_page_events(params=params)) as events:
         async for event in events:
             kind = event.get("type")
@@ -108,10 +118,17 @@ async def run_search(media_id, mtype=None, media_source="themoviedb", site_id=No
                 marks.append({"stage": event.get("stage"), "at": round(time.monotonic() - started, 2)})
             elif kind in {"replace", "done"}:
                 state["results"] = event.get("total_items", state["results"])
-                if kind == "replace" and event.get("items") and first_matched is None:
-                    first_matched = round(time.monotonic() - started, 2)
+                if kind == "replace" and event.get("items"):
+                    # The final replace carries the complete sorted result set.
+                    items = event["items"]
+                    if first_matched is None:
+                        first_matched = round(time.monotonic() - started, 2)
                 complete = complete or kind == "done"
-    return {"media_id": str(media_id), "elapsed": round(time.monotonic() - started, 2),
-            "status": "failed" if failed else "complete" if complete else "incomplete",
-            "first_matched": first_matched, "source_facts": source_facts, "marks": marks,
-            "recognition_cache": recognition_cache, "rust_runtime": rust.status(), **state}
+    result = {"media_id": str(media_id), "elapsed": round(time.monotonic() - started, 2),
+              "status": "failed" if failed else "complete" if complete else "incomplete",
+              "first_matched": first_matched, "source_facts": source_facts, "marks": marks,
+              "recognition_cache": recognition_cache, "rust_runtime": rust.status(),
+              "parse_pool": pool_delta(pool_before, pool_snapshot()), **state}
+    if collect:
+        result["items"] = mask_contexts(items)
+    return result

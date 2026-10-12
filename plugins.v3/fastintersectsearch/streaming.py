@@ -8,6 +8,8 @@ the remaining sites are still being fetched. Only the final merge order is
 reproduced locally with MoviePilot's own sorter/dedup functions.
 """
 import asyncio
+import threading
+import time
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import aclosing
@@ -41,7 +43,9 @@ def parse_page(manual, torrents):
 
 def compare_contexts(incremental, native):
     """Return field paths only; never return credentials or download URLs."""
-    left, right = [c.to_dict() for c in incremental], [c.to_dict() for c in native]
+    def as_dict(item):
+        return item if isinstance(item, dict) else item.to_dict()
+    left, right = [as_dict(c) for c in incremental], [as_dict(c) for c in native]
     def identity(item):
         torrent = item.get("torrent_info", {})
         return tuple(torrent.get(k) for k in ("site_name", "title", "description"))
@@ -67,14 +71,41 @@ class ParsePool:
     """Dedicated executor so parsing never competes with site fetching."""
 
     def __init__(self, workers=4, sorter=None, dedup=None):
+        global POOL
         self.executor = ThreadPoolExecutor(max_workers=max(1, workers),
                                            thread_name_prefix="fastsearch-parse")
         self.sorter = sorter
         self.dedup = dedup
+        self.stats = {"batches": 0, "queue_seconds": 0.0, "execute_seconds": 0.0,
+                      "merge_calls": 0, "merge_seconds": 0.0}
+        self.stats_lock = threading.Lock()
+        POOL = self
+
+    def _add(self, name, value):
+        with self.stats_lock:
+            self.stats[name] += value
+
+    def snapshot(self):
+        """Process-lifetime totals; callers compare before/after for one run."""
+        with self.stats_lock:
+            return {key: round(value, 6) if isinstance(value, float) else value
+                    for key, value in self.stats.items()}
 
     async def run(self, operation, *args):
         loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(self.executor, copy_context().run, operation, *args)
+        submitted = time.monotonic()
+
+        def timed():
+            # Queue time is the part of a batch's latency that no worker did work for.
+            self._add("batches", 1)
+            self._add("queue_seconds", time.monotonic() - submitted)
+            started = time.monotonic()
+            try:
+                return operation(*args)
+            finally:
+                self._add("execute_seconds", time.monotonic() - started)
+
+        future = loop.run_in_executor(self.executor, copy_context().run, timed)
         try:
             return await asyncio.shield(future)
         except asyncio.CancelledError:
@@ -93,13 +124,33 @@ class ParsePool:
 
     def merge(self, batches):
         """Reproduce the tail of SearchResultOwner._parse_result for pre-parsed batches."""
-        merged = [context for batch in batches for context in batch]
-        merged = self.sorter(merged)
-        merged.sort(key=lambda context: not context.media_info_is_target)
-        return self.dedup(merged)
+        started = time.monotonic()
+        try:
+            merged = [context for batch in batches for context in batch]
+            merged = self.sorter(merged)
+            merged.sort(key=lambda context: not context.media_info_is_target)
+            return self.dedup(merged)
+        finally:
+            self._add("merge_calls", 1)
+            self._add("merge_seconds", time.monotonic() - started)
 
     def close(self):
         self.executor.shutdown(wait=False, cancel_futures=True)
+
+
+# The single pool installed by the active plugin instance; lets a measurement
+# read stage totals without threading a handle through the API layer.
+POOL = None
+
+
+def pool_snapshot():
+    return POOL.snapshot() if POOL is not None else None
+
+
+def pool_delta(before, after):
+    if not before or not after:
+        return None
+    return {key: round(after[key] - before[key], 6) for key in after}
 
 
 def make_page_events(original, enabled, pool):

@@ -8,7 +8,7 @@ from app.sdk.logging import logger
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
     plugin_desc = "跨站并发、同站默认 3 秒；过滤、排序和订阅下载沿用 MP。"
-    plugin_version = "3.6.6"
+    plugin_version = "3.7.0"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -131,7 +131,10 @@ class FastIntersectSearch(_PluginBase):
         }, {"path": "/rulecheck", "endpoint": self.api_rulecheck,
             "methods": ["GET"], "auth": "apikey", "summary": "规则兼容性只读自检"},
             {"path": "/diagnostics", "endpoint": self.api_diagnostics,
-             "methods": ["GET"], "auth": "apikey", "summary": "自检进度与解析线程状态"}]
+             "methods": ["GET"], "auth": "apikey", "summary": "自检进度与解析线程状态"},
+            {"path": "/replay", "endpoint": self.api_replay,
+             "methods": ["GET"], "auth": "apikey", "summary": "固定输入回放",
+             "description": "回放 /selftest?record= 录制的站点语料：不发站点请求，只重复执行原生处理链并给出分阶段耗时。"}]
 
     def api_rulecheck(self):
         from .selftest import check_rules
@@ -159,9 +162,14 @@ class FastIntersectSearch(_PluginBase):
 
     async def api_selftest(self, media_id: str = "758891", mtype: str = "电影",
                            media_source: str = "themoviedb", site_id: int | None = None, verify: bool = False,
-                           verify_filter: bool = True):
-        """自检：跑一次搜索，并给出这次搜索新增的站点请求统计。"""
+                           verify_filter: bool = True, record: str = ""):
+        """自检：跑一次搜索，并给出这次搜索新增的站点请求统计。
+
+        传 record=<名称> 时，把这次真实搜索中每个站点页的返回原样落盘成固定语料，
+        供 /replay 反复重放，后续性能核对不必再打站点。
+        """
         from . import selftest
+        from .cassette import CASSETTE
         from .scheduling import SHARED_GATE
         before = {item["site"]: item["requests"] for item in SHARED_GATE.snapshot()}
         from .rulecompat import VALIDATION, VERIFY_FILTER
@@ -169,8 +177,11 @@ class FastIntersectSearch(_PluginBase):
         token = VALIDATION.set(checks)
         filter_token = VERIFY_FILTER.set(verify_filter)
         self._test_progress = {"status": "running"}
+        if record:
+            CASSETTE.start("record", media_id)
         try:
             result = await selftest.run_search(media_id=media_id, mtype=mtype, media_source=media_source, site_id=site_id,
+                                              collect=bool(record),
                                               observe=lambda event: setattr(self, "_test_progress", {"status": "running", **event}))
         except BaseException as error:
             self._test_progress = {"status": "failed", "error": type(error).__name__}
@@ -178,6 +189,10 @@ class FastIntersectSearch(_PluginBase):
         finally:
             VALIDATION.reset(token)
             VERIFY_FILTER.reset(filter_token)
+            cassette = CASSETTE.stop() if record else None
+        if record:
+            result["corpus"] = self._save_corpus(record, result, cassette, {
+                "media_id": str(media_id), "mtype": mtype, "media_source": media_source, "site_id": site_id})
         if checks is not None:
             result["validation"] = checks
             result["equivalent"] = bool(checks) and all(check["equivalent"] for check in checks)
@@ -190,3 +205,51 @@ class FastIntersectSearch(_PluginBase):
         self.save_data("last_selftest", response)
         self._test_progress = {"status": result["status"]}
         return response
+
+    def _save_corpus(self, name, result, cassette, params):
+        from datetime import datetime
+        from .cassette import CORPUS_VERSION, CASSETTE, corpus_path, save_corpus
+        items = result.pop("items", None) or []
+        path = corpus_path(self.get_data_path(), name)
+        payload = {"version": CORPUS_VERSION,
+                   "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                   "plugin_version": self.plugin_version, "params": params,
+                   "config": self.get_config() or {}, "cassette": cassette,
+                   "records": CASSETTE.dump(),
+                   "baseline": {"results": len(items), "items": items}}
+        save_corpus(path, payload)
+        return {"name": name, "path": str(path), "records": cassette.get("records"),
+                "pages": cassette.get("pages"), "duplicates": cassette.get("duplicates"),
+                "baseline_results": len(items), "record_seconds": cassette.get("elapsed")}
+
+    async def api_replay(self, name: str, repeat: int = 1):
+        """回放固定语料：零站点请求，重复执行原生处理链并按阶段计时。"""
+        from . import selftest
+        from .cassette import CASSETTE, corpus_path, load_corpus
+        from .streaming import compare_contexts, pool_delta, pool_snapshot
+        path = corpus_path(self.get_data_path(), name)
+        if not path.exists():
+            return {"success": False, "message": f"语料不存在：{path}"}
+        corpus = load_corpus(path)
+        params = corpus["params"]
+        runs = []
+        for _ in range(max(1, min(5, int(repeat or 1)))):
+            CASSETTE.start("replay", params["media_id"])
+            CASSETTE.load(corpus["records"])
+            pool_before = pool_snapshot()
+            try:
+                result = await selftest.run_search(media_id=params["media_id"], mtype=params.get("mtype"),
+                                                   media_source=params.get("media_source", "themoviedb"),
+                                                   site_id=params.get("site_id"), collect=True)
+            finally:
+                cassette = CASSETTE.stop()
+            comparison = compare_contexts(result.pop("items", None) or [], corpus["baseline"]["items"])
+            runs.append({"elapsed": result["elapsed"], "status": result["status"],
+                         "first_matched": result["first_matched"], "candidates": result["candidates"],
+                         "results": result["results"], "appends": result["appends"],
+                         "marks": result["marks"], "parse_pool": pool_delta(pool_before, pool_snapshot()),
+                         "recognition_cache": result["recognition_cache"], "cassette": cassette,
+                         "comparison": comparison})
+        return {"success": all(run["comparison"]["equivalent"] and run["status"] == "complete" for run in runs),
+                "data": {"corpus": name, "records": len(corpus["records"]),
+                         "baseline_results": corpus["baseline"]["results"], "runs": runs}}
