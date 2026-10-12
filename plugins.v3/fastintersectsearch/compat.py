@@ -13,6 +13,7 @@ from .presentation import make_title_stream
 from .streaming import ParsePool, make_page_events
 from .names import make_prepare_params
 from .recognition import make_meta, make_same_work, make_scope, make_stage, make_probe, make_native_error
+from .rulecompat import make_filter
 
 
 def require(target, name, parameters, kind="sync"):
@@ -116,12 +117,12 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
     patches = [
         (SearchChain, "search_site_torrents", make_site_sync(sync, SHARED_GATE, enabled, minimum_interval)),
         (SearchChain, "async_search_site_torrents", make_site_async(asynchronous, SHARED_GATE, enabled, minimum_interval)),
-        (manual, "_read_pages", make_read_pages(read, manual._offload, enabled, max_pages)),
+        (manual, "_read_pages", make_read_pages(read, manual._offload, enabled, max_pages, streaming_enabled)),
         (result, "_torrent_meta", make_meta(torrent_meta, enabled, parse_configuration)),
         (result, "_same_work_matched", make_same_work(same_work, enabled, result._disambiguation_key, parse_configuration)),
         (result, "_filter_torrents", make_stage(filter_results, enabled, "filter")),
         (result, "_match_torrents", make_stage(match_results, enabled, "match")),
-        (rust, "filter_torrents", make_probe(rust_filter, enabled, "rust_filter")),
+        (rust, "filter_torrents", make_probe(make_filter(rust_filter, enabled), enabled, "rust_filter")),
         (rust, "parse_metainfo", make_probe(rust_parse, enabled, "rust_parse")),
         (metainfo, "_build_python_meta_info", make_probe(python_parse, enabled, "python_parse")),
         (metainfo, "_meta_from_rust", make_probe(project_meta, enabled, "rust_projection")),

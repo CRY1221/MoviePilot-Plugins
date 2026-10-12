@@ -191,3 +191,36 @@ def test_parse_failure_does_not_publish_partial_success(monkeypatch):
         assert harness.saved == []
     finally:
         harness.pool.close()
+
+
+def test_same_source_pages_are_processed_early_and_merged_in_page_order(monkeypatch):
+    harness = build(monkeypatch, {}, keywords=("alpha",))
+    second_fetched = threading.Event()
+    first_processed = threading.Event()
+    async def pages(manual, keys, page):
+        yield "1:alpha", {"page": 0, "pages": [{"page": 0}]}, [Context("1", "first"), Context("1", "dup")]
+        await asyncio.sleep(.08)
+        assert first_processed.is_set(), "第一页必须在第二页请求结束前开始处理"
+        second_fetched.set()
+        yield "1:alpha", {"page": 1, "pages": [{"page": 0}, {"page": 1}]}, [Context("1", "second"), Context("1", "dup")]
+        yield "1:alpha", {"page": 2, "pages": [{"page": 0}, {"page": 1}, {"page": 2}]}, []
+    monkeypatch.setattr(sys.modules["app.chain.search.manual"], "_read_pages", pages)
+    def results(torrents):
+        if torrents[0].title == "first":
+            first_processed.set()
+            assert second_fetched.wait(1)
+            time.sleep(.03)  # The second page finishes parsing first.
+        return torrents
+    harness.manual.results = results
+    harness.pool.sorter = lambda contexts: contexts
+    harness.pool.dedup = lambda contexts: list({c.title: c for c in contexts}.values())
+    try:
+        events = run(harness)
+        assert [item["title"] for item in events[-2]["items"]] == ["first", "dup", "second"]
+        assert events[-2]["candidate_items"] == 4
+        assert events[-2]["sources"][0]["page"] == 2
+        assert len(events[-2]["sources"][0]["pages"]) == 3
+        assert len([e for e in events if e["type"] == "append"]) == 2
+        assert [t.title for t in harness.manual.torrents] == ["first", "dup", "second", "dup"]
+    finally:
+        harness.pool.close()

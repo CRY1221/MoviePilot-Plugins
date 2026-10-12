@@ -8,12 +8,14 @@ the remaining sites are still being fetched. Only the final merge order is
 reproduced locally with MoviePilot's own sorter/dedup functions.
 """
 import asyncio
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import aclosing
 from contextvars import copy_context
 from functools import wraps
 
-from .scheduling import is_music
+from .scheduling import is_music, AGGREGATE_PAGES
+from .rulecompat import VALIDATION
 
 
 class ParsePool:
@@ -64,7 +66,14 @@ def make_page_events(original, enabled, pool):
                 or params.get("source")):
             # Continuation pages and music keep the untouched native generator.
             async with aclosing(original(manual, params)) as events:
-                async for event in events:
+                while True:
+                    token = AGGREGATE_PAGES.set(True)
+                    try:
+                        event = await anext(events)
+                    except StopAsyncIteration:
+                        break
+                    finally:
+                        AGGREGATE_PAGES.reset(token)
                     yield event
             return
 
@@ -93,25 +102,28 @@ def make_page_events(original, enabled, pool):
                                 except StopAsyncIteration:
                                     next_page = None
                                 else:
-                                    facts_by_key[key], torrents_by_key[key] = facts, torrents
+                                    facts_by_key[key] = facts
+                                    torrents_by_key.setdefault(key, []).extend(torrents)
                                     manual.torrents.extend(torrents)
                                     if torrents:
-                                        pending[key] = asyncio.create_task(pool.run(manual.results, torrents))
+                                        batch_id = (key, facts.get("page", page))
+                                        pending[batch_id] = asyncio.create_task(pool.run(manual.results, torrents))
                                     next_page = asyncio.create_task(anext(pages))
                                     yield {"type": "progress", "stage": "searching",
                                            "value": len(facts_by_key) / len(manual.sources.queries) * 90,
                                            "text": f"已抓取 {len(facts_by_key)} / {len(manual.sources.queries)} 个搜索来源",
                                            "candidate_items": len(manual.torrents),
                                            "sources": list(facts_by_key.values())}
-                            for key, task in list(pending.items()):
+                            for batch_id, task in list(pending.items()):
                                 if task not in finished:
                                     continue
                                 # Propagate parsing failures instead of silently losing resources.
                                 batch = task.result()
                                 if not isinstance(batch, list):
                                     raise TypeError("MP 搜索结果解析未返回列表")
-                                del pending[key]
-                                batches_by_key[key] = batch
+                                del pending[batch_id]
+                                key, batch_page = batch_id
+                                batches_by_key.setdefault(key, {})[batch_page] = batch
                                 preview_count += len(batch)
                                 yield {"type": "append", "stage": "matched",
                                        "items": [context.to_dict() for context in batch],
@@ -128,8 +140,13 @@ def make_page_events(original, enabled, pool):
                 yield {"type": "progress", "stage": "filtering", "value": 98,
                        "text": f"正在过滤匹配 {len(manual.torrents)} 个候选资源 ..."}
                 contexts = await pool.run(
-                    pool.merge, [batches_by_key[key] for key in manual.sources.queries
-                                 if key in batches_by_key])
+                    pool.merge, [batch for key in manual.sources.queries
+                                 for _, batch in sorted(batches_by_key.get(key, {}).items())])
+                if VALIDATION.get() is not None:
+                    baseline = await pool.run(manual.results, deepcopy(manual.torrents))
+                    VALIDATION.get().append({"kind": "final_merge", "candidates": len(manual.torrents),
+                                             "equivalent": [c.to_dict() for c in contexts] == [c.to_dict() for c in baseline],
+                                             "incremental_results": len(contexts), "native_results": len(baseline)})
                 if contexts:
                     break
                 keys = manual.sources.add_keywords()

@@ -6,7 +6,51 @@ plugin: it runs the Web search path in the running app and reports the numbers w
 compare across versions.
 """
 import time
+from copy import deepcopy
 from contextlib import aclosing
+
+
+def check_rules():
+    """No site requests: isolate each rule and compare Rust with native Python."""
+    from app.adapters.system import rust
+    from app.application.rules import BUILTIN_RULE_SET, RuleHelper
+    from app.domain.context import TorrentInfo
+    from app.domain.metainfo import _rust_parse_options
+    from app.modules.filter import FilterModule
+    from .rulecompat import compatible_rules
+
+    rules = deepcopy(BUILTIN_RULE_SET)
+    rules.update({rule.id: rule.model_dump() for rule in RuleHelper().get_custom_rules()})
+    normalized = compatible_rules(rules)
+    module = FilterModule()
+    module.rule_set = rules
+    rows = []
+    for key in rules:
+        groups = [{"name": "compatibility-check", "rule_string": key}]
+        torrents = [TorrentInfo(title="Diagnostic.2026.1080p.WEB-DL-GTR", description="", size=1024**3)]
+        row = {"rule": key, "rewritten": rules[key] != normalized[key]}
+        for name, definitions in (("original", rules), ("compatible", normalized)):
+            try:
+                result = rust._moviepilot_rust.filter_torrents_fast(
+                    groups, torrents, {key: definitions[key]}, None, _rust_parse_options())
+                row[name] = "ok"
+            except Exception as error:
+                row[name] = f"{type(error).__name__}: {str(error)[:300]}"
+        if row["rewritten"] and row["compatible"] == "ok":
+            # Fixed corpus includes all ASCII separators, known release groups,
+            # nonmatches, descriptions and labels; no credentials or URLs.
+            titles = [f"Diagnostic.2026.1080p.WEB-DL{chr(c)}{team}{tail}"
+                      for c in range(32, 127) for team in ("GTR", "PbK", "CHD", "ADE", "NTb", "NGB", "RO", "WiKi", "unknown")
+                      for tail in ("", "A", ".")]
+            corpus = [TorrentInfo(title=t, description="", size=1024**3) for t in titles]
+            native = module._FilterModule__filter_torrents_with_python(groups, deepcopy(corpus), None)
+            expected = [(titles.index(t.title), t.pri_order) for t in native]
+            actual = rust._moviepilot_rust.filter_torrents_fast(
+                groups, corpus, {key: normalized[key]}, None, _rust_parse_options())
+            row["corpus"] = len(corpus)
+            row["equivalent"] = list(map(tuple, actual)) == expected
+        rows.append(row)
+    return {"success": all(row["compatible"] == "ok" and row.get("equivalent", True) for row in rows), "data": rows}
 
 
 def resolve_mtype(value):

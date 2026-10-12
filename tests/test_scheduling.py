@@ -293,9 +293,9 @@ def test_site_pages_are_walked_until_the_site_runs_out():
     manual = paged_manual({0: ["a", "b"], 1: ["c"], 2: []})
     wrapper = make_read_pages(lambda *_: None, offload, lambda: True, lambda: 10)
     result = asyncio.run(collect(wrapper, manual, ["1:alpha"]))
-    key, facts, torrents = result[0]
+    key, facts, _ = result[-1]
     assert manual.calls == [0, 1, 2]
-    assert [item.title for item in torrents] == ["a", "b", "c"]
+    assert [[item.title for item in torrents] for _, _, torrents in result] == [["a", "b"], ["c"], []]
     assert facts["page"] == 2  # preserve the terminal empty page
     assert [entry["page"] for entry in facts["pages"]] == [0, 1, 2]
 
@@ -308,7 +308,7 @@ def test_page_cap_and_duplicates_are_respected():
     result = asyncio.run(collect(wrapper, manual, ["1:alpha"]))
     assert manual.calls == [0, 1]
     # 插件不再自己按站点+标题+描述去重，重复项交给 MP 的规则链与 _remove_duplicate。
-    assert [item.title for item in result[0][2]] == ["a", "a", "b"]
+    assert [item.title for _, _, torrents in result for item in torrents] == ["a", "a", "b"]
 
 
 def test_non_pageable_site_and_errors_stop_the_walk():
@@ -355,3 +355,14 @@ def test_resource_pages_only_override_inside_a_media_search():
         SEARCH_SCOPE.reset(token)
     assert wrapper() == 3
     assert make_resource_pages(lambda: 3, lambda: False, lambda: 10)() == 3
+
+
+def test_disabled_streaming_aggregates_without_losing_pages():
+    async def offload(operation, *args):
+        return operation(*args)
+    manual = paged_manual({0: ["a"], 1: ["b"], 2: []})
+    wrapper = make_read_pages(lambda *_: None, offload, lambda: True, lambda: 10, lambda: False)
+    result = asyncio.run(collect(wrapper, manual, ["1:alpha"]))
+    assert len(result) == 1
+    assert [t.title for t in result[0][2]] == ["a", "b"]
+    assert result[0][1]["page"] == 2

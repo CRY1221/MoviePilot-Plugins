@@ -8,7 +8,7 @@ from app.sdk.logging import logger
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
     plugin_desc = "跨站并发、同站默认 3 秒；过滤、排序和订阅下载沿用 MP。"
-    plugin_version = "3.6.2"
+    plugin_version = "3.6.3"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -127,15 +127,29 @@ class FastIntersectSearch(_PluginBase):
             "auth": "apikey",
             "summary": "极速搜索自检",
             "description": "在容器进程内执行一次网页搜索，返回耗时、候选/结果数量与各站点请求次数。",
-        }]
+        }, {"path": "/rulecheck", "endpoint": self.api_rulecheck,
+            "methods": ["GET"], "auth": "apikey", "summary": "规则兼容性只读自检"}]
+
+    def api_rulecheck(self):
+        from .selftest import check_rules
+        return check_rules()
 
     async def api_selftest(self, media_id: str = "758891", mtype: str = "电影",
-                           media_source: str = "themoviedb", site_id: int | None = None):
+                           media_source: str = "themoviedb", site_id: int | None = None, verify: bool = False):
         """自检：跑一次搜索，并给出这次搜索新增的站点请求统计。"""
         from . import selftest
         from .scheduling import SHARED_GATE
         before = {item["site"]: item["requests"] for item in SHARED_GATE.snapshot()}
-        result = await selftest.run_search(media_id=media_id, mtype=mtype, media_source=media_source, site_id=site_id)
+        from .rulecompat import VALIDATION
+        checks = [] if verify else None
+        token = VALIDATION.set(checks)
+        try:
+            result = await selftest.run_search(media_id=media_id, mtype=mtype, media_source=media_source, site_id=site_id)
+        finally:
+            VALIDATION.reset(token)
+        if checks is not None:
+            result["validation"] = checks
+            result["equivalent"] = bool(checks) and all(check["equivalent"] for check in checks)
         result["sites"] = [
             {**item, "requests": item["requests"] - before.get(item["site"], 0)}
             for item in SHARED_GATE.snapshot()

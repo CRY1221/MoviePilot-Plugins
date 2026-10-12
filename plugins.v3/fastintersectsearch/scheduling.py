@@ -9,6 +9,7 @@ from functools import wraps
 
 
 SEARCH_SCOPE = ContextVar("fastsearch_scope", default=None)
+AGGREGATE_PAGES = ContextVar("fastsearch_aggregate_pages", default=False)
 
 
 def is_music(value):
@@ -148,7 +149,7 @@ def make_site_async(original, gate, enabled, minimum_interval=lambda owner: 0):
     return call
 
 
-def make_read_pages(original, offload, enabled, max_pages=lambda: 1):
+def make_read_pages(original, offload, enabled, max_pages=lambda: 1, per_page=lambda: True):
     @wraps(original)
     async def read_pages(manual, keys, page):
         if not enabled() or is_music(getattr(manual.plan.mediainfo, "type", None)):
@@ -162,35 +163,42 @@ def make_read_pages(original, offload, enabled, max_pages=lambda: 1):
         if not groups:
             return
 
-        async def read_source(site, requested_page):
-            key = site["keys"].popleft()
+        cap = max(1, int(max_pages()))
+
+        async def read_source(site, _slot):
+            key = site["keys"][0]
+            requested_page = site.get("page", page)
             facts, torrents = await offload(manual.read, key, requested_page)
-            page_facts = [dict(facts)]
-            # Walk the rest of this keyword's pages on that site until the site
-            # runs out, an error shows up, or the configured cap is reached.
-            # 不做本地去重：MP 的规则链与 _remove_duplicate 会处理重复资源。
-            cap = requested_page + max(1, int(max_pages())) - 1
-            while (not facts.get("error") and facts.get("can_continue") and facts.get("page", requested_page) < cap
-                   and manual.sources.pageable(key)):
-                next_facts, next_torrents = await offload(manual.read, key, facts["page"] + 1)
-                page_facts.append(dict(next_facts))
-                facts = next_facts
-                if next_facts.get("error") or not next_torrents:
-                    break
-                torrents.extend(next_torrents)
-            facts = {**facts, "pages": page_facts}
+            history = site.setdefault("history", [])
+            history.append(dict(facts))
+            more = (not facts.get("error") and facts.get("can_continue") and torrents
+                    and requested_page < page + cap - 1 and manual.sources.pageable(key))
+            if more:
+                site["page"] = requested_page + 1
+            else:
+                site["keys"].popleft()
+                site["page"], site["history"] = page, []
+            facts = {**facts, "pages": list(history)}
             return [(key, facts, torrents)]
 
         pages = manual.owner._iter_site_page_results(
             indexer_sites=[{"keys": group} for group in groups.values()],
-            search_pages=[page] * max(map(len, groups.values())),
+            search_pages=list(range(cap * max(map(len, groups.values())))),
             search_page=read_source,
             should_continue=lambda site, _items: bool(site["keys"]),
             task_owner="chain.search.manual.site_page",
         )
+        collected = {}
         async with aclosing(pages):
             async for _site, _page, results, _continued, _elapsed in pages:
-                yield results[0]
+                key, facts, torrents = results[0]
+                if per_page() and not AGGREGATE_PAGES.get():
+                    yield key, facts, torrents
+                else:
+                    batch = collected.setdefault(key, [])
+                    batch.extend(torrents)
+                    if not _site["keys"] or _site["keys"][0] != key:
+                        yield key, facts, collected.pop(key)
     return read_pages
 
 
