@@ -102,6 +102,50 @@ class ParsePool:
         self.executor.shutdown(wait=False, cancel_futures=True)
 
 
+def warm_meta(torrents, mediainfo):
+    """Run the native parse for one finished site batch so the cache is warm.
+
+    Passing no custom words means the entry is only reused when the native call
+    also uses none; any other configuration simply recomputes and ignores this.
+    """
+    from app.chain.search import result
+    for torrent in torrents:
+        result._torrent_meta(torrent, None, mediainfo)
+
+
+def make_provider_warm(original, enabled, pool):
+    """Parse each site batch while the remaining sites are still being fetched.
+
+    The native resolution loop hands one batch to ``_parse_result`` only after
+    every site has answered, so parsing otherwise sits on the critical path. The
+    batches themselves arrive incrementally, so each one can be parsed during the
+    waits of the ones after it. Only the existing parse cache is populated here;
+    the search result still comes from the untouched native call.
+    """
+    @wraps(original)
+    async def provider_events(owner, step, streaming):
+        params = getattr(step, "params", None)
+        mediainfo = params.get("mediainfo") if isinstance(params, dict) else None
+        if (not enabled() or mediainfo is None
+                or is_music(getattr(mediainfo, "type", None))):
+            async for event in original(owner, step, streaming):
+                yield event
+            return
+        pending = []
+        try:
+            async for event in original(owner, step, streaming):
+                items = event.get("items") if isinstance(event, dict) else None
+                if items:
+                    pending.append(asyncio.create_task(pool.run(warm_meta, list(items), mediainfo)))
+                yield event
+        finally:
+            # Only the final batch cannot overlap anything; earlier ones already
+            # ran while the sites after them were still answering.
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+    return provider_events
+
+
 def make_page_events(original, enabled, pool):
     """Stream filtered results: parse every source page while the rest still loads."""
 

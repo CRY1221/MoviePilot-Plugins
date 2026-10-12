@@ -10,7 +10,7 @@ from .scheduling import (
 )
 from .subscription import make_owned_task, make_advance_sources
 from .presentation import make_title_stream
-from .streaming import ParsePool, make_page_events, make_dedup
+from .streaming import ParsePool, make_page_events, make_dedup, make_provider_warm
 from .names import make_prepare_params
 from .recognition import make_meta, make_same_work, make_scope, make_stage, make_probe, make_native_error
 from .rulecompat import make_filter
@@ -86,6 +86,8 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
         return (metainfo._rust_parse_options()["_cache_key"], id(metainfo.get_metainfo_accelerator()))
     run = require(execution.SearchExecutionOwner, "run", "owner plan media_chain")
     events = require(execution.SearchExecutionOwner, "events", "owner plan media_chain streaming", "generator")
+    provider_events = require(execution.SearchExecutionOwner, "_provider_events",
+                              "owner step streaming", "generator")
     delay = require(execution, "_keyword_delay", "owner search_count")
     from app.chain.search.pagination import SearchPaginationOwner
     resource_pages = require(SearchPaginationOwner, "_get_search_resource_pages", "")
@@ -136,6 +138,8 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
         (manual, "_page_events", make_scope(make_page_events(page_events, streaming_enabled, parse_pool), enabled, is_music, generator=True)),
         (execution.SearchExecutionOwner, "run", staticmethod(make_scope(make_execution_run(run, enabled, no_plugin_sources), enabled, is_music))),
         (execution.SearchExecutionOwner, "events", staticmethod(make_scope(make_execution_events(events, enabled, no_plugin_sources), enabled, is_music, generator=True))),
+        (execution.SearchExecutionOwner, "_provider_events",
+         staticmethod(make_provider_warm(provider_events, enabled, parse_pool))),
         (execution, "_keyword_delay", make_keyword_delay(delay, enabled)),
         (SearchPaginationOwner, "_get_search_resource_pages",
          staticmethod(make_resource_pages(resource_pages, enabled, max_pages))),

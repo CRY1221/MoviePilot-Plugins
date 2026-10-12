@@ -9,7 +9,8 @@ from types import ModuleType, SimpleNamespace as NS
 
 import pytest
 
-from fastsearch.streaming import ParsePool, make_page_events, make_dedup, parse_page, DEFER_DEDUP
+from fastsearch.streaming import (ParsePool, make_page_events, make_dedup, parse_page, DEFER_DEDUP,
+                                make_provider_warm)
 from conftest import native_nodes
 
 
@@ -247,5 +248,77 @@ def test_defer_page_dedup_preserves_native_global_order_and_last_representative(
         assert incremental == native
         assert not DEFER_DEDUP.get()
         assert host._remove_duplicate([first, last]) == [last]
+    finally:
+        pool.close()
+
+
+def test_provider_warm_parses_each_batch_while_later_sites_still_answer(monkeypatch):
+    """预热必须与后续站点抓取重叠，且逐个事件原样透传。"""
+    parsed, yielded = [], []
+    module = ModuleType("app.chain.search.result")
+
+    def torrent_meta(torrent, custom_words, mediainfo):
+        parsed.append((torrent.title, custom_words, time.monotonic()))
+        return f"meta:{torrent.title}"
+
+    module._torrent_meta = torrent_meta
+    monkeypatch.setitem(sys.modules, "app.chain.search", ModuleType("app.chain.search"))
+    monkeypatch.setitem(sys.modules, "app.chain.search.result", module)
+
+    order = []
+
+    async def provider_events(owner, step, streaming):
+        for index in range(3):
+            await asyncio.sleep(0.25)
+            order.append(("fetch", index, time.monotonic()))
+            yield {"items": [NS(title=f"batch{index}")], "site": index}
+
+    pool = ParsePool(workers=2)
+    try:
+        wrapper = make_provider_warm(provider_events, lambda: True, pool)
+        step = NS(params={"mediainfo": NS(type="电影")})
+
+        async def drain():
+            async for event in wrapper(None, step, True):
+                yielded.append(event)
+
+        asyncio.run(drain())
+    finally:
+        pool.close()
+
+    # 事件原样透传，顺序不变
+    assert [e["site"] for e in yielded] == [0, 1, 2]
+    assert [e["items"][0].title for e in yielded] == ["batch0", "batch1", "batch2"]
+    # 每批都被解析，且没有 custom_words 参与缓存键
+    assert sorted(t for t, _, _ in parsed) == ["batch0", "batch1", "batch2"]
+    assert {words for _, words, _ in parsed} == {None}
+    # 重叠证据：第 0 批的解析发生在第 2 批被抓到之前
+    first_parse = min(t for _, _, t in parsed)
+    assert first_parse < order[-1][2], "第 0 批的解析必须早于最后一次抓取完成"
+
+
+def test_provider_warm_is_inert_when_disabled_or_music(monkeypatch):
+    calls = []
+    module = ModuleType("app.chain.search.result")
+    module._torrent_meta = lambda *args: calls.append(args)
+    monkeypatch.setitem(sys.modules, "app.chain.search", ModuleType("app.chain.search"))
+    monkeypatch.setitem(sys.modules, "app.chain.search.result", module)
+
+    async def provider_events(owner, step, streaming):
+        yield {"items": [NS(title="x")]}
+
+    pool = ParsePool(workers=1)
+    try:
+        cases = ((False, {"mediainfo": NS(type="电影")}),   # 插件停用
+                 (True, {"mediainfo": NS(type="音乐")}),     # 音乐透传
+                 (True, {}))                                 # 没有 mediainfo
+        for enabled, params in cases:
+            step = NS(params=params)
+
+            async def drain():
+                return [event async for event in make_provider_warm(provider_events, lambda: enabled, pool)(None, step, True)]
+
+            assert len(asyncio.run(drain())) == 1
+        assert calls == []
     finally:
         pool.close()
