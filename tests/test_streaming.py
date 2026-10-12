@@ -116,7 +116,8 @@ def test_first_parse_runs_while_other_sites_still_fetch(monkeypatch):
         assert first_parse < last_fetch - .1, "解析必须与抓取重叠，而不是等到全部抓完"
         kinds = [event["type"] for event in events]
         assert kinds.count("append") == 6 and "replace" in kinds and kinds[-1] == "done"
-        assert [event["type"] for event in events if event["type"] == "progress"] == ["progress"]
+        assert len([event for event in events if event["stage"] == "searching"]) == 6
+        assert all(event["stage"] == "matched" for event in events if event["type"] == "append")
         ordered = sorted((f"{site}:{keyword}-0" for site in "123" for keyword in ("alpha", "beta")))
         final = sorted(item["title"] for item in events[-2]["items"])
         assert final == ordered
@@ -158,5 +159,35 @@ def test_empty_source_pages_are_not_parsed(monkeypatch):
     try:
         assert all(batch for batch in harness.batches)
         assert harness.saved and len(harness.saved[0]) == len(harness.batches)
+    finally:
+        harness.pool.close()
+
+
+def test_filtered_result_is_delivered_before_last_fetch(monkeypatch):
+    harness = build(monkeypatch, {"1:alpha": .01, "2:alpha": .25}, keywords=("alpha",))
+    harness.manual.preview = lambda *_: (_ for _ in ()).throw(AssertionError("raw preview used"))
+    observed = []
+    async def scenario():
+        async with aclosing(harness.stream(harness.manual, {})) as events:
+            async for event in events:
+                if event["type"] == "append" and event["items"]:
+                    observed.append((time.monotonic(), len(harness.fetch_done)))
+    try:
+        asyncio.run(scenario())
+        assert observed[0][1] < 3
+        assert observed[0][0] < max(moment for _, moment in harness.fetch_done)
+    finally:
+        harness.pool.close()
+
+
+def test_parse_failure_does_not_publish_partial_success(monkeypatch):
+    harness = build(monkeypatch, {}, keywords=("alpha",))
+    def fail(torrents):
+        raise RuntimeError("parser unavailable")
+    harness.manual.results = fail
+    try:
+        with pytest.raises(RuntimeError, match="parser unavailable"):
+            run(harness)
+        assert harness.saved == []
     finally:
         harness.pool.close()

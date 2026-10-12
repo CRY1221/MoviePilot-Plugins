@@ -74,6 +74,13 @@ class FastIntersectSearchTool(MoviePilotTool):
         if not complete:
             return {"success": False, "status": "incomplete", "message": "MP 未返回搜索完成事件"}
         selected = items[:request.top_k] if request.top_k else items
+        # Search output is for inspection. Native Context serialization also
+        # includes download credentials, which must stay inside MoviePilot.
+        selected = [{**item, "torrent_info": {
+            key: value for key, value in item["torrent_info"].items()
+            if key not in {"site_cookie", "site_ua", "enclosure", "page_url"}
+        }} if isinstance(item.get("torrent_info"), dict) else dict(item)
+                    for item in selected]
         return {"success": True, "status": "results" if items else "empty", "total": len(items),
                 "shown": len(selected), "items": selected,
                 "site_completeness": "unknown", "message": "结果来自 MP；原生接口不报告所有站点是否成功"}

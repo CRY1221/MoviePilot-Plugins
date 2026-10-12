@@ -165,6 +165,7 @@ def make_read_pages(original, offload, enabled, max_pages=lambda: 1):
         async def read_source(site, requested_page):
             key = site["keys"].popleft()
             facts, torrents = await offload(manual.read, key, requested_page)
+            page_facts = [dict(facts)]
             # Walk the rest of this keyword's pages on that site until the site
             # runs out, an error shows up, or the configured cap is reached.
             # 不做本地去重：MP 的规则链与 _remove_duplicate 会处理重复资源。
@@ -172,10 +173,12 @@ def make_read_pages(original, offload, enabled, max_pages=lambda: 1):
             while (facts.get("can_continue") and facts.get("page", requested_page) < cap
                    and manual.sources.pageable(key)):
                 next_facts, next_torrents = await offload(manual.read, key, facts["page"] + 1)
+                page_facts.append(dict(next_facts))
+                facts = next_facts
                 if next_facts.get("error") or not next_torrents:
                     break
                 torrents.extend(next_torrents)
-                facts = next_facts
+            facts = {**facts, "pages": page_facts}
             return [(key, facts, torrents)]
 
         pages = manual.owner._iter_site_page_results(

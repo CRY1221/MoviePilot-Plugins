@@ -196,3 +196,16 @@ def test_tool_errors_and_missing_final_event_are_not_empty_success(monkeypatch, 
     assert result["status"] == status and result["success"] is success
     assert "private remote error" not in str(result)
     assert closed == [True]
+
+
+def test_mcp_results_do_not_include_download_credentials(monkeypatch):
+    module, _ = tools_module(monkeypatch)
+    original = {"torrent_info": {"title": "film", "site_name": "site", "site_cookie": "secret",
+                                "enclosure": "encoded-secret", "page_url": "signed-link"}}
+    class Chain:
+        async def async_search_by_title_stream(self, **kwargs):
+            yield {"type": "done", "items": [original]}
+    monkeypatch.setattr(module, "SearchChain", Chain)
+    result = asyncio.run(module.FastIntersectSearchTool().run(title="film"))
+    assert result["items"] == [{"torrent_info": {"title": "film", "site_name": "site"}}]
+    assert original["torrent_info"]["site_cookie"] == "secret"

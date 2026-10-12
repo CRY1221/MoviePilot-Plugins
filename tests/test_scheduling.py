@@ -149,7 +149,8 @@ def test_manual_native_scheduler_fast_site_advances_without_round_barrier():
             assert (await asyncio.wait_for(anext(events), .5))[0] == "fast2"
             slow_release.set()
             result = await anext(events)
-            assert result == ("slow1", {"page": 3, "can_continue": True, "error": None}, ["slow1"])
+            assert result[0] == "slow1" and result[2] == ["slow1"]
+            assert result[1]["pages"] == [{"page": 3, "can_continue": True, "error": None}]
         assert reads == [("fast1", 3), ("fast2", 3), ("slow1", 3)]
     asyncio.run(scenario())
 
@@ -295,7 +296,8 @@ def test_site_pages_are_walked_until_the_site_runs_out():
     key, facts, torrents = result[0]
     assert manual.calls == [0, 1, 2]
     assert [item.title for item in torrents] == ["a", "b", "c"]
-    assert facts["page"] == 1  # last page that had data
+    assert facts["page"] == 2  # preserve the terminal empty page
+    assert [entry["page"] for entry in facts["pages"]] == [0, 1, 2]
 
 
 def test_page_cap_and_duplicates_are_respected():

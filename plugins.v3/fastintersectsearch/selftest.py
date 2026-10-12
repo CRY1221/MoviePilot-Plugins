@@ -6,6 +6,7 @@ plugin: it runs the Web search path in the running app and reports the numbers w
 compare across versions.
 """
 import time
+from contextlib import aclosing
 
 
 def resolve_mtype(value):
@@ -32,15 +33,30 @@ async def run_search(media_id, mtype=None, media_source="themoviedb"):
               "mtype": resolve_mtype(mtype), "page": 0}
     started = time.monotonic()
     marks, state = [], {"appends": 0, "candidates": 0, "results": 0, "sources": 0}
-    async for event in chain.search_page_events(params=params):
-        kind = event.get("type")
-        if kind == "append":
-            state["appends"] += 1
-            state["candidates"] = event.get("candidate_items") or state["candidates"]
-            state["sources"] = len(event.get("sources") or []) or state["sources"]
-        elif kind == "progress":
-            marks.append({"stage": event.get("stage"), "at": round(time.monotonic() - started, 2)})
-        elif kind in {"replace", "done"}:
-            state["results"] = event.get("total_items", state["results"])
+    complete, failed, source_facts = False, False, []
+    first_matched = None
+    async with aclosing(chain.search_page_events(params=params)) as events:
+        async for event in events:
+            kind = event.get("type")
+            if "candidate_items" in event:
+                state["candidates"] = event["candidate_items"]
+            if "sources" in event:
+                source_facts = event["sources"]
+                state["sources"] = len(source_facts)
+            if kind == "error":
+                failed = True
+                break
+            if kind == "append":
+                state["appends"] += 1
+                if event.get("stage") == "matched" and event.get("items") and first_matched is None:
+                    first_matched = round(time.monotonic() - started, 2)
+            elif kind == "progress":
+                marks.append({"stage": event.get("stage"), "at": round(time.monotonic() - started, 2)})
+            elif kind in {"replace", "done"}:
+                state["results"] = event.get("total_items", state["results"])
+                if kind == "replace" and event.get("items") and first_matched is None:
+                    first_matched = round(time.monotonic() - started, 2)
+                complete = complete or kind == "done"
     return {"media_id": str(media_id), "elapsed": round(time.monotonic() - started, 2),
-            "marks": marks, **state}
+            "status": "failed" if failed else "complete" if complete else "incomplete",
+            "first_matched": first_matched, "source_facts": source_facts, "marks": marks, **state}

@@ -41,3 +41,10 @@ def test_prepare_params_trims_only_for_expanded_keywords():
     assert make_prepare_params(original, lambda: True)(info, keyword="explicit")[1] == ["a", "b", "c", "d"]
     assert make_prepare_params(original, lambda: False)(info)[1] == ["a", "b", "c", "d"]
     assert make_prepare_params(original, lambda: True)(media(type="音乐"))[1] == ["a", "b", "c", "d"]
+
+
+def test_music_with_titles_does_not_lose_native_aliases():
+    info = media(type="音乐", title="歌", original_title="歌", en_title="Song")
+    aliases = ["歌", "Song", "Album", "Artist"]
+    original = lambda *args, **kwargs: (None, aliases)
+    assert make_prepare_params(original, lambda: True)(info)[1] == aliases

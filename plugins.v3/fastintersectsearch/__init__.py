@@ -7,8 +7,8 @@ from app.log import logger
 
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
-    plugin_desc = "跨站并发、同站默认 5 秒；过滤、排序和订阅下载沿用 MP。"
-    plugin_version = "3.5.0"
+    plugin_desc = "跨站并发、同站默认 3 秒；过滤、排序和订阅下载沿用 MP。"
+    plugin_version = "3.5.1"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -141,4 +141,4 @@ class FastIntersectSearch(_PluginBase):
             for item in SHARED_GATE.snapshot()
             if item["requests"] - before.get(item["site"], 0) > 0
         ]
-        return {"success": True, "data": result}
+        return {"success": result["status"] == "complete", "data": result}

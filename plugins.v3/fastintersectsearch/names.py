@@ -1,8 +1,7 @@
 """Limit the search keywords to original / Chinese / English names.
 
-MoviePilot expands every alias it knows (``names``, ``hk_title``, ``tw_title``,
-``sg_title`` ...). For a mainstream title that can be twenty names, so every
-site gets asked twenty times. This adapter keeps the names that actually matter
+MoviePilot expands aliases up to its configured name limit. This adapter keeps
+the names that actually matter
 for finding releases: the original title, one Chinese name and one English
 name. The cast is taken from the media info MoviePilot already recognised, so
 no extra metadata request is made.
@@ -63,7 +62,7 @@ def make_prepare_params(original, enabled):
         season_episodes, keywords = original(
             mediainfo, keyword=keyword, no_exists=no_exists,
             include_candidates=include_candidates)
-        if not enabled() or keyword or not keywords or is_music(mediainfo):
+        if not enabled() or keyword or not keywords or is_music(getattr(mediainfo, "type", None)):
             return season_episodes, keywords
         return season_episodes, select_search_names(mediainfo, keywords)
 
