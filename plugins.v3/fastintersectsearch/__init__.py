@@ -12,7 +12,7 @@ class FastIntersectSearch(_PluginBase):
     plugin_desc = ("跨站并发+同站默认3秒频控，站内结果边到边解析；"
                    "接管Web搜索、通知渠道点播与订阅搜索，"
                    "规则与排序沿用 MP，订阅按集下载可收敛到同一制作组。")
-    plugin_version = "3.6.21"
+    plugin_version = "3.6.22"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -168,8 +168,10 @@ class FastIntersectSearch(_PluginBase):
                  "页面上的差别最直观：第一条真实结果 3.9 秒就到，不必等整次搜索跑完。",
                  "text-body-2 mb-1"),
             line("抓取段插件反而慢（同站固定间隔，52 秒 vs 原生 8 秒），但只占总时长一小部分。"
-                 "以上是一次真实对照，两次执行的入口与关键词轮次不完全相同，口径与原始日志见项目 "
-                 "README 与 baseline/。", "text-caption text-medium-emphasis mb-4"),
+                 "236.0 秒这组取自 3.6.6，此后解析又优化过两轮，端到端还没重测。"
+                 "以上是一次真实对照，两次执行的入口与关键词轮次不完全相同，"
+                 "口径与原始日志见项目 README 与 baseline/。",
+                 "text-caption text-medium-emphasis mb-4"),
             line("⚖️ 规则与排序", "text-subtitle-1 font-weight-bold mb-2"),
             line("过滤、匹配、排序严格沿用【设定 → 规则 → 优先级规则组】：本插件不改规则、"
                  "不改优先级、不复活被拒资源。建议先校准好优先级规则组，排序结果才合心意。",
