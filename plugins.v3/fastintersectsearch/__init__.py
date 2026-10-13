@@ -12,7 +12,7 @@ class FastIntersectSearch(_PluginBase):
     plugin_desc = ("跨站并发+同站默认3秒频控，站内结果边到边解析；"
                    "接管Web搜索、通知渠道点播与订阅搜索，"
                    "规则与排序沿用 MP，订阅按集下载可收敛到同一制作组。")
-    plugin_version = "3.6.20"
+    plugin_version = "3.6.21"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -157,6 +157,19 @@ class FastIntersectSearch(_PluginBase):
                  "所有搜索都按「跨站并发抓取 + 同站固定间隔 + 每站结果边到边解析」执行，"
                  "再交给 MP 原生的过滤与排序。音乐搜索完全放行，不做任何干预。",
                  "text-body-2 mb-4"),
+            line("🚀 比原生快多少", "text-subtitle-1 font-weight-bold mb-2"),
+            line("同一次《兰香如故》搜索、最终结果完全一致（517 条）：插件 236.0 秒，"
+                 "原生 514.1 秒，快 2.2 倍。差距不在第一轮，在后面——原生每一轮都从零重算，"
+                 "候选池越大越慢（第 1 轮 86 秒、第 2 轮 176 秒、第 3 轮 218 秒）；"
+                 "插件复用上一轮的解析结果，第 2 轮只要 44 秒。",
+                 "text-body-2 mb-1"),
+            line("单条解析上差距更大：识别词 584 条时原生一条要 79.9 毫秒；词表超过内核正则缓存"
+                 "容量时插件改走 MP 自带的解析器，四部作品实测解析快 7.7–19 倍。"
+                 "页面上的差别最直观：第一条真实结果 3.9 秒就到，不必等整次搜索跑完。",
+                 "text-body-2 mb-1"),
+            line("抓取段插件反而慢（同站固定间隔，52 秒 vs 原生 8 秒），但只占总时长一小部分。"
+                 "以上是一次真实对照，两次执行的入口与关键词轮次不完全相同，口径与原始日志见项目 "
+                 "README 与 baseline/。", "text-caption text-medium-emphasis mb-4"),
             line("⚖️ 规则与排序", "text-subtitle-1 font-weight-bold mb-2"),
             line("过滤、匹配、排序严格沿用【设定 → 规则 → 优先级规则组】：本插件不改规则、"
                  "不改优先级、不复活被拒资源。建议先校准好优先级规则组，排序结果才合心意。",
