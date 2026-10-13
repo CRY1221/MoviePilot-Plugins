@@ -9,10 +9,10 @@ from app.schemas.types import ChainEventType
 
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
-    plugin_desc = ("跨站并发+同站默认3秒频控，站内结果边到边解析；"
+    plugin_desc = ("跨站并发，同站只留一个在途请求、不额外等待；站内结果边到边解析；"
                    "接管Web搜索、通知渠道点播与订阅搜索，"
                    "规则与排序沿用 MP，订阅按集下载可收敛到同一制作组。")
-    plugin_version = "3.6.23"
+    plugin_version = "3.6.24"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -29,7 +29,7 @@ class FastIntersectSearch(_PluginBase):
         self._names = True
         self._group_lock = True
         self._group_lock_apply = None
-        self._interval = 3.0
+        self._interval = 0.0
         self._status = "未启用"
         self._test_progress = None
 
@@ -56,10 +56,10 @@ class FastIntersectSearch(_PluginBase):
             return
         try:
             # Old 3-second configs are deliberately migrated to the agreed minimum.
-            interval = float(config.get("site_sleep_seconds", 3))
+            interval = float(config.get("site_sleep_seconds", 0))
             if not math.isfinite(interval):
                 raise ValueError("站点间隔必须是有限数字")
-            self._interval = max(1.0, interval)
+            self._interval = max(0.0, interval)
             from app.application.torrent.download import TorrentHelper
             from app.chain.subscribe.facade import SubscribeChain
             from app.schemas.types import MediaType
@@ -154,21 +154,21 @@ class FastIntersectSearch(_PluginBase):
             line("⚡ 插件介绍", "text-subtitle-1 font-weight-bold mb-2"),
             line("启用后接管 MoviePilot 的搜索链路：Web 网页端搜索、通知渠道点播"
                  "（Telegram / 微信机器人），以及可选的订阅搜索与订阅资源检查。"
-                 "所有搜索都按「跨站并发抓取 + 同站固定间隔 + 每站结果边到边解析」执行，"
+                 "所有搜索都按「跨站并发抓取 + 每站结果边到边解析」执行，"
                  "再交给 MP 原生的过滤与排序。音乐搜索完全放行，不做任何干预。",
                  "text-body-2 mb-4"),
             line("🚀 比原生快多少", "text-subtitle-1 font-weight-bold mb-2"),
-            line("同一次《兰香如故》搜索、最终结果完全一致（517 条）：插件 236.0 秒，"
-                 "原生 514.1 秒，快 2.2 倍。差距不在第一轮，在后面——原生每一轮都从零重算，"
-                 "候选池越大越慢（第 1 轮 86 秒、第 2 轮 176 秒、第 3 轮 218 秒）；"
-                 "插件复用上一轮的解析结果，第 2 轮只要 44 秒。",
+            line("0.3.8 之前（实测）：同一次《兰香如故》搜索，结果完全一致，"
+                 "插件 181.3 秒、原生 417.3 秒，快 2.30 倍。差距不在抓取，在解析——"
+                 "每轮「抓完→出结果」原生要 46/80/100 秒，插件只要 0.9/2.2/1.9 秒。",
                  "text-body-2 mb-1"),
-            line("页面上差别最直观：第一条真实结果 3.9 秒就到，不必等整次搜索跑完。",
+            line("这段优势现在归上游了：MoviePilot-Rust 0.3.8 修掉了「识别词过多导致解析断崖变慢」"
+                 "（MoviePilot-Rust#17，我们提的），单条解析从 79.9 毫秒降到 4.7 毫秒。"
+                 "原生自己就快之后，搜索端到端已经基本持平（同口径 19.6 秒 vs 19.3 秒，"
+                 "而且那次插件还带着同站等待，现已移除）。",
                  "text-body-2 mb-1"),
-            line("抓取段插件反而慢（同站固定间隔，52 秒 vs 原生 8 秒），但只占总时长一小部分。"
-                 "这组数字取自 3.6.6 / MoviePilot-Rust 0.3.7。Rust 0.3.8（2026-10-12）修掉了"
-                 "识别词过多导致解析变慢的问题，本插件已不再改走 Python 解析，"
-                 "新旧口径下的完整对照正在重测。口径与原始日志见项目 README 与 baseline/。",
+            line("现在插件独有的是感知速度：第一条真实结果 3.9 秒就到，"
+                 "原生的精确/ID 搜索要等整轮跑完才给真结果。口径与原始日志见 README 与 baseline/。",
                  "text-caption text-medium-emphasis mb-4"),
             line("⚖️ 规则与排序", "text-subtitle-1 font-weight-bold mb-2"),
             line("过滤、匹配、排序严格沿用【设定 → 规则 → 优先级规则组】：本插件不改规则、"
@@ -188,7 +188,8 @@ class FastIntersectSearch(_PluginBase):
             {"component": "VDivider", "props": {"class": "my-6"}},
             {"component": "VRow", "content": [
                 column(6, number("site_sleep_seconds", "同站请求间隔（秒）",
-                                 "默认 3，从上次请求结束算起。调小更快，但更容易被站点限流或临时封禁。")),
+                                 "默认 0，即不额外等待：只保证同站不并发，节奏完全交给站点自己配的流控"
+                                 "（MP 站点管理里的「间隔」）。只有站点明确要求时才需要填。", minimum=0)),
                 column(6, number("max_pages_per_site", "每站最多抓取页数（1-20）",
                                  "默认 1，即只搜首页。调大能翻到更多资源，代价是更慢、对站点请求更多；"
                                  "站点没有更多结果时会自动停，不会空抓。", maximum=20)),
@@ -208,14 +209,15 @@ class FastIntersectSearch(_PluginBase):
                                  "不希望插件碰订阅的话可以关掉，订阅这一块完全交回 MP。")),
             ]},
         ]}]
-        return form, {"enabled": False, "site_sleep_seconds": 3, "max_pages_per_site": 1,
+        return form, {"enabled": False, "site_sleep_seconds": 0, "max_pages_per_site": 1,
                       "bilingual_names": True, "accelerate_new_subscribe": True}
 
     def get_page(self):
         """插件详情页：沿用旧版黑曜石玻璃拟态耗时大盘，数据取自本进程实时统计。"""
         from .page import render
         from .scheduling import SHARED_GATE
-        summary = (f"同站间隔 {self._interval:.0f} 秒（从上次请求结束起算）｜每站最多 {self._max_pages} 页｜"
+        pacing = f"同站间隔 {self._interval:.0f} 秒" if self._interval else "同站只限并发、不额外等待"
+        summary = (f"{pacing}｜每站最多 {self._max_pages} 页｜"
                    f"接管订阅搜索 {'开' if self._subscription else '关'}")
         return render(self._status, SHARED_GATE.snapshot(), self._site_icon_map(), summary)
 

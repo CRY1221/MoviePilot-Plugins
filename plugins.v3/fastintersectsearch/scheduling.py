@@ -24,7 +24,7 @@ class SiteRequestGate:
     The interval is measured from the end of the previous request on that site,
     matching the old plugin's behaviour: request -> wait -> next request.
     """
-    def __init__(self, interval=3.0, clock=time.monotonic, poll_interval=.02):
+    def __init__(self, interval=0.0, clock=time.monotonic, poll_interval=.02):
         self.interval = interval
         self.clock = clock
         self.poll_interval = poll_interval

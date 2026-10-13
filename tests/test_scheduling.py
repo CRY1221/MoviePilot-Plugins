@@ -186,6 +186,19 @@ def test_event_scope_reset_before_yield_across_tasks():
     asyncio.run(scenario())
 
 
+def test_zero_interval_keeps_one_request_in_flight_without_waiting():
+    """默认 0 秒：只保证同站不并发，不在两次请求之间加任何时间。"""
+    now = [0.0]
+    gate = SiteRequestGate(interval=0.0, clock=lambda: now[0], poll_interval=0)
+    state, first = gate.enqueue({"id": 1})
+    assert gate.claim(state, first, 0.0)
+    now[0] = 10.0                       # 上一个请求跑了 10 秒
+    gate.release(state, first)
+    _, second = gate.enqueue({"id": 1})
+    assert gate.claim(state, second, 0.0)   # 结束即可发，不等
+    gate.release(state, second)
+
+
 def test_interval_counts_from_previous_request_end():
     now = [0.0]
     gate = SiteRequestGate(interval=3.0, clock=lambda: now[0], poll_interval=0)
