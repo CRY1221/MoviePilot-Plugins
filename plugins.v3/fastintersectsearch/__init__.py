@@ -9,8 +9,10 @@ from app.schemas.types import ChainEventType
 
 class FastIntersectSearch(_PluginBase):
     plugin_name = "极速搜索"
-    plugin_desc = "跨站并发、同站默认 3 秒；规则与排序沿用 MP，订阅按集下载可收敛到同一制作组。"
-    plugin_version = "3.6.17"
+    plugin_desc = ("跨站并发+同站默认3秒频控，站内结果边到边解析；"
+                   "接管Web搜索、通知渠道点播与订阅搜索，"
+                   "规则与排序沿用 MP，订阅按集下载可收敛到同一制作组。")
+    plugin_version = "3.6.18"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -115,46 +117,86 @@ class FastIntersectSearch(_PluginBase):
         self._status = "未启用"
 
     def get_form(self):
-        return [{"component": "VForm", "content": [
-            {"component": "VSwitch", "props": {"model": "enabled", "label": "启用极速搜索"}},
-            {"component": "VTextField", "props": {
-                "model": "max_pages_per_site", "type": "number", "min": 1, "max": 20,
-                "label": "每站最多抓取页数（1-20）"
-                         "｜默认 1，即只搜首页。调大能翻到更多资源，代价是更慢、对站点请求更多；"
-                         "站点没有更多结果时会自动停，不会空抓。按 ID 与按关键词搜索都按这个值抓。"}},
-            {"component": "VTextField", "props": {
-                "model": "site_sleep_seconds", "type": "number", "min": 1,
-                "label": "同站请求间隔（秒，从上次请求结束算起）"
-                         "｜默认 3。调小会更快，但更容易被站点限流或临时封禁。"}},
-            {"component": "VSwitch", "props": {
-                "model": "streaming_pipeline", "label": "边抓边洗｜每站结果一到就解析，不等所有站点抓完"}},
-            {"component": "VSwitch", "props": {
-                "model": "bilingual_names", "label": "中英搜索｜只用原名/中文名/英文名，替代 MP 的多别名展开"}},
-            {"component": "VSwitch", "props": {
-                "model": "accelerate_new_subscribe", "label": "加速新订阅首次搜索｜并发预取各站待请求页"}},
-            {"component": "VSwitch", "props": {
-                "model": "single_group_download",
-                "label": "一季同组｜按集下载时只用一个制作组，不混组"
-                         "｜MP 本身按集补时会从多个制作组各取几集，一季拼成杂烩。"
-                         "开启后，订阅下载的候选会收敛到这一个组：已经下过的组优先，"
-                         "首轮则取 MP 排序最靠前的那个层级里、覆盖集数最多的组。"
-                         "认不出制作组的资源一律放行；某个组补不齐剩下的集时不会自动改用别的组。"}},
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal"}, "text":
-             "过滤、匹配、排序沿用 MP 自己那套：本插件不改规则、不改优先级、不复活被拒资源。"
-             "订阅尚无已下载集时，首次搜索会优先尝试整包；没有整包由 MP 回退按集下载，"
-             "此时按集候选会按上一项收敛到同一个制作组（可关）。"
-             "识别词较多时解析会自动改用 MP 自带的 Python 解析器，结果与走 Rust 一致，只是更快。"},
-        ]}], {"enabled": False, "accelerate_new_subscribe": True, "site_sleep_seconds": 3,
-              "streaming_pipeline": True, "max_pages_per_site": 1, "bilingual_names": True,
-              "single_group_download": True}
+        """配置表单：只留需要用户决策的开关，其余按默认值运行。
+
+        `streaming_pipeline`（边抓边洗）与 `bilingual_names`（中英搜索）属于插件的
+        默认行为，不再占用界面；代码仍读这两个键并默认开启，老配置里关掉过的仍然算数。
+        """
+        def line(text, css="text-body-2"):
+            return {"component": "div", "props": {"class": css}, "text": text}
+
+        def column(width, *content):
+            return {"component": "VCol", "props": {"cols": 12, "md": width, "class": "py-3"},
+                    "content": list(content)}
+
+        def switch(model, label, hint):
+            return {"component": "VSwitch", "props": {
+                "model": model, "label": label, "color": "primary",
+                "hint": hint, "persistent-hint": True, "class": "mb-1"}}
+
+        def number(model, label, hint, minimum=1, maximum=None):
+            props = {"model": model, "label": label, "type": "number", "min": minimum,
+                     "hint": hint, "persistent-hint": True, "class": "mb-1"}
+            if maximum is not None:
+                props["max"] = maximum
+            return {"component": "VTextField", "props": props}
+
+        intro = {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
+                                                  "class": "mt-1 mb-3"}, "content": [
+            line("⚡ 插件介绍", "text-subtitle-1 font-weight-bold mb-2"),
+            line("启用后接管 MoviePilot 的搜索链路：Web 网页端搜索、通知渠道点播"
+                 "（Telegram / 微信机器人），以及可选的订阅搜索与订阅资源检查。"
+                 "所有搜索都按「跨站并发抓取 + 同站固定间隔 + 每站结果边到边解析」执行，"
+                 "再交给 MP 原生的过滤与排序。音乐搜索完全放行，不做任何干预。",
+                 "text-body-2 mb-4"),
+            line("⚖️ 规则与排序", "text-subtitle-1 font-weight-bold mb-2"),
+            line("过滤、匹配、排序严格沿用【设定 → 规则 → 优先级规则组】：本插件不改规则、"
+                 "不改优先级、不复活被拒资源。建议先校准好优先级规则组，排序结果才合心意。",
+                 "text-body-2 mb-4"),
+            line("🛡️ 兼容性与失败表现", "text-subtitle-1 font-weight-bold mb-2"),
+            line("插件逐个校验所依赖的 MP 内部接口签名。任一处对不上，插件会自动停用并在日志里"
+                 "写明原因，不会带着错误的假设继续跑；总开关关闭时不安装任何补丁。"),
+        ]}
+
+        form = [{"component": "VForm", "content": [
+            {"component": "VRow", "content": [
+                column(6, switch("enabled", "启用极速搜索",
+                                 "总开关。关闭后不安装任何补丁，搜索行为与 MP 原生完全一致。")),
+            ]},
+            {"component": "VRow", "content": [column(12, intro)]},
+            {"component": "VDivider", "props": {"class": "my-6"}},
+            {"component": "VRow", "content": [
+                column(6, number("site_sleep_seconds", "同站请求间隔（秒）",
+                                 "默认 3，从上次请求结束算起。调小更快，但更容易被站点限流或临时封禁。")),
+                column(6, number("max_pages_per_site", "每站最多抓取页数（1-20）",
+                                 "默认 1，即只搜首页。调大能翻到更多资源，代价是更慢、对站点请求更多；"
+                                 "站点没有更多结果时会自动停，不会空抓。", maximum=20)),
+            ]},
+            {"component": "VDivider", "props": {"class": "my-6"}},
+            {"component": "VRow", "content": [
+                column(12, line("可选功能", "text-subtitle-2 font-weight-bold")),
+            ]},
+            {"component": "VRow", "content": [
+                column(6, switch("accelerate_new_subscribe", "接管订阅搜索",
+                                 "并发预取各站待请求页，订阅首次搜索更快。"
+                                 "不希望插件介入订阅的话可以关掉，订阅搜索完全交回 MP。")),
+                column(6, switch("single_group_download", "一季同组",
+                                 "按集补时只用一个制作组。MP 本身会从多个制作组各取几集、"
+                                 "把一季拼成杂烩。开启后候选收敛到这一季该用的组：已下过的组优先，"
+                                 "首轮取 MP 排序最靠前的层级里覆盖集数最多的组。"
+                                 "认不出组的资源一律放行；某个组补不齐剩下的集也不会自动换组。")),
+            ]},
+        ]}]
+        return form, {"enabled": False, "site_sleep_seconds": 3, "max_pages_per_site": 1,
+                      "accelerate_new_subscribe": True, "single_group_download": True}
 
     def get_page(self):
         """插件详情页：沿用旧版黑曜石玻璃拟态耗时大盘，数据取自本进程实时统计。"""
         from .page import render
         from .scheduling import SHARED_GATE
         summary = (f"同站间隔 {self._interval:.0f} 秒（从上次请求结束起算）｜每站最多 {self._max_pages} 页｜"
-                   f"边抓边洗 {'开' if self._streaming else '关'}｜中英搜索 {'开' if self._names else '关'}｜"
-                   f"新订阅首搜加速 {'开' if self._subscription else '关'}")
+                   f"接管订阅搜索 {'开' if self._subscription else '关'}｜"
+                   f"一季同组 {'开' if self._group_lock else '关'}")
         return render(self._status, SHARED_GATE.snapshot(), self._site_icon_map(), summary)
 
     def _site_icon_map(self):

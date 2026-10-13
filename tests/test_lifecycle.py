@@ -171,6 +171,28 @@ def test_reload_then_old_stop_does_not_unhook_new_instance(monkeypatch):
     assert Plugin.get_instance() is None
 
 
+def form_models(node):
+    if isinstance(node, dict):
+        found = []
+        props = node.get("props")
+        if isinstance(props, dict) and "model" in props:
+            found.append(props["model"])
+        for value in node.values():
+            found += form_models(value)
+        return found
+    if isinstance(node, list):
+        return [model for item in node for model in form_models(item)]
+    return []
+
+
+def test_form_shows_every_model_it_defaults_and_hides_the_rest():
+    form, default = plugin_class()().get_form()
+    models = form_models(form)
+    assert sorted(models) == sorted(default)
+    # 边抓边洗与中英搜索是默认行为，不占界面；代码仍从配置读，缺省为开。
+    assert not {"streaming_pipeline", "bilingual_names"} & set(models)
+
+
 def test_incompatible_host_leaves_plugin_disabled(monkeypatch):
     targets = host(monkeypatch)
     targets["SearchScan"].run = lambda self, unknown, extra: None
