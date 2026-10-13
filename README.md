@@ -125,4 +125,4 @@ LRU 命中率趋近 0，每条标题要重编译约 145 个正则。
 
 ## 致谢
 
-感谢 gemini、gpt、Claude code 以及又爱又恨的 DeepSeek
+本项目是纯人机协作项目，人盯，AI做，未手动写一行代码，感谢 gemini、gpt、Claude 以及又爱又恨的 DeepSeek
