@@ -189,8 +189,8 @@ def test_form_shows_every_model_it_defaults_and_hides_the_rest():
     form, default = plugin_class()().get_form()
     models = form_models(form)
     assert sorted(models) == sorted(default)
-    # 边抓边洗与中英搜索是默认行为，不占界面；代码仍从配置读，缺省为开。
-    assert not {"streaming_pipeline", "bilingual_names"} & set(models)
+    # 边抓边洗、中英搜索与一季同组是默认行为，不占界面；代码仍从配置读，缺省为开。
+    assert not {"streaming_pipeline", "bilingual_names", "single_group_download"} & set(models)
 
 
 def test_incompatible_host_leaves_plugin_disabled(monkeypatch):

@@ -12,7 +12,7 @@ class FastIntersectSearch(_PluginBase):
     plugin_desc = ("跨站并发+同站默认3秒频控，站内结果边到边解析；"
                    "接管Web搜索、通知渠道点播与订阅搜索，"
                    "规则与排序沿用 MP，订阅按集下载可收敛到同一制作组。")
-    plugin_version = "3.6.18"
+    plugin_version = "3.6.19"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -119,8 +119,9 @@ class FastIntersectSearch(_PluginBase):
     def get_form(self):
         """配置表单：只留需要用户决策的开关，其余按默认值运行。
 
-        `streaming_pipeline`（边抓边洗）与 `bilingual_names`（中英搜索）属于插件的
-        默认行为，不再占用界面；代码仍读这两个键并默认开启，老配置里关掉过的仍然算数。
+        边抓边洗（`streaming_pipeline`）、中英搜索（`bilingual_names`）与一季同组
+        （`single_group_download`）都是插件的默认行为，不占用界面；代码仍读这三个键并
+        默认开启，老配置里关掉过的仍然算数。
         """
         def line(text, css="text-body-2"):
             return {"component": "div", "props": {"class": css}, "text": text}
@@ -180,23 +181,17 @@ class FastIntersectSearch(_PluginBase):
                 column(6, switch("accelerate_new_subscribe", "接管订阅搜索",
                                  "并发预取各站待请求页，订阅首次搜索更快。"
                                  "不希望插件介入订阅的话可以关掉，订阅搜索完全交回 MP。")),
-                column(6, switch("single_group_download", "一季同组",
-                                 "按集补时只用一个制作组。MP 本身会从多个制作组各取几集、"
-                                 "把一季拼成杂烩。开启后候选收敛到这一季该用的组：已下过的组优先，"
-                                 "首轮取 MP 排序最靠前的层级里覆盖集数最多的组。"
-                                 "认不出组的资源一律放行；某个组补不齐剩下的集也不会自动换组。")),
             ]},
         ]}]
         return form, {"enabled": False, "site_sleep_seconds": 3, "max_pages_per_site": 1,
-                      "accelerate_new_subscribe": True, "single_group_download": True}
+                      "accelerate_new_subscribe": True}
 
     def get_page(self):
         """插件详情页：沿用旧版黑曜石玻璃拟态耗时大盘，数据取自本进程实时统计。"""
         from .page import render
         from .scheduling import SHARED_GATE
         summary = (f"同站间隔 {self._interval:.0f} 秒（从上次请求结束起算）｜每站最多 {self._max_pages} 页｜"
-                   f"接管订阅搜索 {'开' if self._subscription else '关'}｜"
-                   f"一季同组 {'开' if self._group_lock else '关'}")
+                   f"接管订阅搜索 {'开' if self._subscription else '关'}")
         return render(self._status, SHARED_GATE.snapshot(), self._site_icon_map(), summary)
 
     def _site_icon_map(self):
