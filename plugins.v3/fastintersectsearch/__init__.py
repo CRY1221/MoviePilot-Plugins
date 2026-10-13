@@ -12,7 +12,7 @@ class FastIntersectSearch(_PluginBase):
     plugin_desc = ("跨站并发，同站只留一个在途请求、不额外等待；站内结果边到边解析；"
                    "接管Web搜索、通知渠道点播与订阅搜索，"
                    "规则与排序沿用 MP，订阅按集下载可收敛到同一制作组。")
-    plugin_version = "3.6.24"
+    plugin_version = "3.6.25"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -164,8 +164,9 @@ class FastIntersectSearch(_PluginBase):
                  "text-body-2 mb-1"),
             line("这段优势现在归上游了：MoviePilot-Rust 0.3.8 修掉了「识别词过多导致解析断崖变慢」"
                  "（MoviePilot-Rust#17，我们提的），单条解析从 79.9 毫秒降到 4.7 毫秒。"
-                 "原生自己就快之后，搜索端到端已经基本持平（同口径 19.6 秒 vs 19.3 秒，"
-                 "而且那次插件还带着同站等待，现已移除）。",
+                 "原生自己就快之后，搜索端到端已经基本持平——背靠背同题同页数实测："
+                 "插件 17.1 秒 / 原生 20.5 秒，而两边「抓完→出结果」只差 0.3 秒（5.0 vs 4.7），"
+                 "那 3 秒差异来自站点抓取波动。",
                  "text-body-2 mb-1"),
             line("现在插件独有的是感知速度：第一条真实结果 3.9 秒就到，"
                  "原生的精确/ID 搜索要等整轮跑完才给真结果。口径与原始日志见 README 与 baseline/。",
