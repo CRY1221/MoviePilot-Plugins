@@ -15,7 +15,6 @@ from .streaming import (ParsePool, make_page_events, make_dedup, make_provider_w
 from .names import make_prepare_params
 from .recognition import make_meta, make_same_work, make_scope, make_stage, make_probe, make_native_error
 from .rulecompat import make_filter
-from .parsepath import make_parse_path, RUST_WORD_CACHE_CAPACITY
 
 
 def require(target, name, parameters, kind="sync"):
@@ -82,7 +81,6 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
     rust_filter = require(rust, "filter_torrents", "groups torrent_list rule_set mediainfo metainfo_options")
     rust_parse = require(rust, "parse_metainfo", "title subtitle options")
     python_parse = require(metainfo, "_build_python_meta_info", "title subtitle custom_words")
-    requires_python = require(metainfo, "_requires_python_metainfo", "title custom_words")
     project_meta = require(metainfo, "_meta_from_rust", "parsed")
     rule_groups = require(RuleHelper, "get_rule_group_by_media", "self media group_names")
     progress_update = require(ProgressHelper, "update", "self value text data")
@@ -142,8 +140,6 @@ def install(enabled, subscription_enabled, interval, streaming_enabled=None, max
         (rust, "parse_metainfo", make_probe(rust_parse, enabled, "rust_parse")),
         (metainfo, "_build_python_meta_info", make_probe(python_parse, enabled, "python_parse")),
         (metainfo, "_meta_from_rust", make_probe(project_meta, enabled, "rust_projection")),
-        (metainfo, "_requires_python_metainfo",
-         make_parse_path(requires_python, enabled, RUST_WORD_CACHE_CAPACITY, parse_configuration)),
         (RuleHelper, "get_rule_group_by_media", make_probe(rule_groups, enabled, "rule_group_lookup")),
         (ProgressHelper, "update", make_probe(progress_update, enabled, "progress_update")),
         (rust, "_raise_non_rust_panic", make_native_error(native_error, enabled)),
