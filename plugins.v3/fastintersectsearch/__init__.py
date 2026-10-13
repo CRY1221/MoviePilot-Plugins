@@ -12,7 +12,7 @@ class FastIntersectSearch(_PluginBase):
     plugin_desc = ("跨站并发+同站默认3秒频控，站内结果边到边解析；"
                    "接管Web搜索、通知渠道点播与订阅搜索，"
                    "规则与排序沿用 MP，订阅按集下载可收敛到同一制作组。")
-    plugin_version = "3.6.19"
+    plugin_version = "3.6.20"
     plugin_author = "CRY1221"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/search.png"
     plugin_order = 30
@@ -66,7 +66,7 @@ class FastIntersectSearch(_PluginBase):
             from .compat import install
             from .grouplock import make_group_lock
             self._group_lock_apply = make_group_lock(
-                lambda: self.get_state() and self._group_lock,
+                self._group_lock_enabled,
                 TorrentHelper.sort_torrents, SubscribeChain.parse_subscribe_source_keyword,
                 MediaType.TV.value, log=logger)
             self._hooks = install(self.get_state, lambda: self.get_state() and self._subscription,
@@ -107,6 +107,13 @@ class FastIntersectSearch(_PluginBase):
     def get_state(self):
         return self._enabled
 
+    def _group_lock_enabled(self):
+        """一季同组跟着「接管订阅搜索」走。
+
+        关掉订阅接管的人就是不想插件碰订阅，那就别去改他这一季下哪个组。
+        """
+        return self._enabled and self._subscription and self._group_lock
+
     def stop_service(self):
         self._enabled = False
         if self._hooks is not None:
@@ -119,9 +126,9 @@ class FastIntersectSearch(_PluginBase):
     def get_form(self):
         """配置表单：只留需要用户决策的开关，其余按默认值运行。
 
-        边抓边洗（`streaming_pipeline`）、中英搜索（`bilingual_names`）与一季同组
-        （`single_group_download`）都是插件的默认行为，不占用界面；代码仍读这三个键并
-        默认开启，老配置里关掉过的仍然算数。
+        边抓边洗（`streaming_pipeline`）与一季同组（`single_group_download`）是插件的
+        默认行为，不占用界面；一季同组没有自己的开关，它跟着「接管订阅搜索」走——
+        不希望插件碰订阅的人，不会希望插件去改他这一季下哪个组。
         """
         def line(text, css="text-body-2"):
             return {"component": "div", "props": {"class": css}, "text": text}
@@ -178,13 +185,18 @@ class FastIntersectSearch(_PluginBase):
                 column(12, line("可选功能", "text-subtitle-2 font-weight-bold")),
             ]},
             {"component": "VRow", "content": [
+                column(6, switch("bilingual_names", "中英搜索",
+                                 "开启时只用原名、中文名、英文名搜索（最多 3 个）；"
+                                 "关闭时按 MP 系统设置展开全部别名。"
+                                 "显式关键词与音乐搜索不受影响。")),
                 column(6, switch("accelerate_new_subscribe", "接管订阅搜索",
-                                 "并发预取各站待请求页，订阅首次搜索更快。"
-                                 "不希望插件介入订阅的话可以关掉，订阅搜索完全交回 MP。")),
+                                 "接管订阅的搜索与下载：并发预取各站待请求页，首次搜索更快；"
+                                 "订阅按集下载时把候选收敛到同一个制作组，不混组。"
+                                 "不希望插件碰订阅的话可以关掉，订阅这一块完全交回 MP。")),
             ]},
         ]}]
         return form, {"enabled": False, "site_sleep_seconds": 3, "max_pages_per_site": 1,
-                      "accelerate_new_subscribe": True}
+                      "bilingual_names": True, "accelerate_new_subscribe": True}
 
     def get_page(self):
         """插件详情页：沿用旧版黑曜石玻璃拟态耗时大盘，数据取自本进程实时统计。"""
