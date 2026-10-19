@@ -260,7 +260,8 @@ def remove_empty_dirs(client: Cd2Client, root: str, depth: int = 4) -> List[str]
 def tidy_dir(client: Cd2Client, target: str, name: str,
              delete_junk_only: bool = True,
              enable_filter_rules: bool = True,
-             min_video_size: int = DEFAULT_MIN_VIDEO_SIZE) -> Dict[str, Any]:
+             min_video_size: int = DEFAULT_MIN_VIDEO_SIZE,
+             file_name: str = "") -> Dict[str, Any]:
     """
     清理目录内的广告文件并重命名视频、字幕与目录。
 
@@ -268,12 +269,14 @@ def tidy_dir(client: Cd2Client, target: str, name: str,
 
     :param client: CD2 客户端
     :param target: 目标目录
-    :param name: 目标番号名
+    :param name: 目标番号名（用于目录）
     :param delete_junk_only: 为 True 时只保留主视频与字幕；为 False 时保留全部视频与字幕
     :param enable_filter_rules: 是否启用识别筛选规则
     :param min_video_size: 小于该体积的视频视为垃圾
+    :param file_name: 视频文件名（不含扩展名）；为空时用 ``name``
     :return: 整理结果
     """
+    file_base = file_name or name
     files = collect_files(client, target)
     if not files:
         return {"ok": False, "reason": "目录为空或未落盘"}
@@ -335,10 +338,10 @@ def tidy_dir(client: Cd2Client, target: str, name: str,
     rename_map: List[tuple[str, str]] = []
     renamed_files: List[str] = []
     if parts:
-        for item, (_base, _label, number) in parts:
+        for index, (item, _parsed) in enumerate(parts, 1):
             suffix = PurePosixPath(item[2]).suffix
-            # Emby 多段命名：<名称> - cd1.ext / <名称> - cd2.ext
-            target_name = f"{name} - cd{number}{suffix}"
+            # Emby 多段命名：<名称> - part1.ext / <名称> - part2.ext
+            target_name = f"{file_base} - part{index}{suffix}"
             actual = item[2]
             if target_name != item[2]:
                 if client.rename(item[0], target_name):
@@ -349,7 +352,7 @@ def tidy_dir(client: Cd2Client, target: str, name: str,
         target_file_name = renamed_files[0]
     else:
         ext = PurePosixPath(keep_name).suffix
-        target_file_name = f"{name}{ext}"
+        target_file_name = f"{file_base}{ext}"
         actual = keep_name
         if keep_name != target_file_name:
             if client.rename(keep_path, target_file_name):

@@ -2,15 +2,15 @@
 磁力候选的筛选与排序规则。
 
 排序优先级（从高到低）：
-1. 带「第一会所新片」标志（``第一會所新片`` / ``SIS001``）；
-2. 中文字幕（``-C`` / ``_CH`` / ``中字`` / ``字幕``）；
-3. 4K / UHD，且体积不小于 5GB；
-4. 其余。
+1. 中文字幕（``-C`` / ``_CH`` / ``中字`` / ``字幕``），且体积不低于最大候选的一半；
+2. 明确的 UHD / 2160P / 2160I，且体积不小于 5GB；裸 4K 视为码率，不算分辨率；
+3. 其余。
 
 硬性排除（列出即出局）：
 - 无码破解 ``-U`` / ``-UC`` / ``uncensored``；
-- 假 4K：标了 4K/UHD/2160P，但体积小于 5GB；
+- 假 4K：标了 UHD/2160P/2160I，但体积小于 5GB；
 - 720P / 720I；
+- 480P / 360P 及以下；
 - 广告或非视频资源（命名含推广域名、纯压缩包等）。
 
 同一档内按体积从大到小取；不把分辨率标签当作主要质量依据。
@@ -21,9 +21,6 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-# 第一会所标志
-SIS001_PATTERNS = ("第一會所新片", "第一会所新片", "SIS001", "sis001")
-
 # 真 4K 标志；JAV 发布名里的 4K/6K/8K 多为码率标签，不能当分辨率
 UHD_PATTERN = re.compile(r"(?:^|[\s._\-\[@])(?:UHD|2160P|2160I)(?:$|[\s._\-\]@])", re.I)
 
@@ -32,6 +29,11 @@ UHD_MIN_SIZE = 5 * 1024 ** 3
 
 # 明确标注 720P 的资源直接排除
 RES_720_PATTERN = re.compile(r"(?:^|[\s._\-])(?:720P|720I)(?:$|[\s._\-])", re.I)
+
+# 明确标注 480P/360P 及以下的资源直接排除
+RES_LOW_PATTERN = re.compile(
+    r"(?:^|[\s._\-])(?:480P|480I|360P|360I)(?:$|[\s._\-])", re.I
+)
 
 # 小于该体积的视频视为垃圾；可在插件设置里覆盖
 DEFAULT_MIN_VIDEO_SIZE = 300 * 1024 ** 2
@@ -55,17 +57,6 @@ VIDEO_EXT = {
     ".mp4", ".mkv", ".avi", ".wmv", ".ts", ".m2ts", ".mov",
     ".flv", ".rmvb", ".rm", ".mpg", ".mpeg", ".webm",
 }
-
-
-def has_sis001(name: str) -> bool:
-    """
-    判断磁力名称是否带「第一会所新片」标志。
-
-    :param name: 磁力名称
-    :return: 命中返回 True
-    """
-    lowered = (name or "").lower()
-    return any(pattern.lower() in lowered for pattern in SIS001_PATTERNS)
 
 
 def is_uhd(name: str, size_bytes: int = 0) -> bool:
@@ -107,6 +98,16 @@ def is_720p(name: str) -> bool:
     return bool(RES_720_PATTERN.search(name or ""))
 
 
+def is_low_res(name: str) -> bool:
+    """
+    判断是否明确标注 480P/360P 及以下。
+
+    :param name: 磁力名称
+    :return: 命中返回 True
+    """
+    return bool(RES_LOW_PATTERN.search(name or ""))
+
+
 def has_chinese_sub(name: str) -> bool:
     """
     判断是否标注中文字幕。
@@ -139,23 +140,26 @@ def is_junk(name: str) -> bool:
     return bool(JUNK_PATTERN.search(name or ""))
 
 
-def rank(magnet: Dict[str, Any]) -> tuple:
+def rank(magnet: Dict[str, Any], max_size: int = 0) -> tuple:
     """
     计算候选排序键（数值越小越优先）。
 
+    中文字幕只在体积达到最大候选一半时进入第一档；否则按体积与其它候选竞争。
+
     :param magnet: 磁力条目
+    :param max_size: 过滤后候选中的最大体积
     :return: 可直接用于 sorted 的元组
     """
     name = magnet.get("name") or ""
     size_bytes = int(magnet.get("size_bytes") or 0)
-    if has_sis001(name):
+    if has_chinese_sub(name) and (
+        not max_size or size_bytes >= int(max_size * 0.5)
+    ):
         tier = 0
-    elif has_chinese_sub(name):
-        tier = 1
     elif is_uhd(name, size_bytes):
-        tier = 2
+        tier = 1
     else:
-        tier = 3
+        tier = 2
     # 同档内体积大的优先，因此体积取负值
     return (tier, -size_bytes)
 
@@ -213,6 +217,8 @@ def select(
             reason = "假4K（小于5GB）"
         elif is_720p(name):
             reason = "720P"
+        elif is_low_res(name):
+            reason = "480P/360P"
         elif 0 < size_bytes < min_size:
             reason = f"小于{min_mb}MB"
         elif not allow_junk and is_junk(name):
@@ -231,13 +237,12 @@ def select(
             "total": len(magnets),
         }
 
-    ordered = sorted(candidates, key=rank)
+    max_size = max(int(item.get("size_bytes") or 0) for item in candidates)
+    ordered = sorted(candidates, key=lambda item: rank(item, max_size))
     chosen = ordered[0]
     name = chosen.get("name") or ""
     size_bytes = int(chosen.get("size_bytes") or 0)
-    if has_sis001(name):
-        tier = "第一会所新片"
-    elif has_chinese_sub(name):
+    if has_chinese_sub(name) and size_bytes >= int(max_size * 0.5):
         tier = "中文字幕"
     elif is_uhd(name, size_bytes):
         tier = "4K"

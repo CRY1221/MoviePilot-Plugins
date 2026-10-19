@@ -695,9 +695,81 @@ class EmbyLibrary:
                 })
         return result
 
-    def list_items(self, limit: int = 50) -> list:
+    @staticmethod
+    def _code_from_path(path: str) -> str:
+        """从路径中的文件夹或文件名提取番号。"""
+        for part in reversed(PurePosixPath(path or "").parts):
+            match = re.search(
+                r"(?i)(?<![A-Z0-9])([A-Z]{2,10}-\d{2,5})(?![0-9])", part
+            )
+            if match:
+                return match.group(1).upper()
+        return ""
+
+    def list_low_res(self, max_height: int = 1080, limit: int = 5000) -> list:
         """
-        列出目标库内的条目，供调试库配置。
+        扫描目标 Emby 库，返回已知高度低于阈值的条目。
+
+        同一番号取最高版本；只要库内存在 1080P 及以上版本，就不算低清。
+
+        :param max_height: 判定为低清的高度上限（不含）
+        :param limit: 单次最多读取条目数
+        :return: [{server, item_id, code, title, path, height, width, bitrate, size}]
+        """
+        threshold = max(1, int(max_height or 1080))
+        result: Dict[str, Dict[str, Any]] = {}
+        for server, service in self._services().items():
+            instance = getattr(service, "instance", None)
+            if instance is None:
+                continue
+            allowed = self._allowed_library_ids(instance)
+            url = (
+                "[HOST]emby/Items?Recursive=true"
+                "&IncludeItemTypes=Movie,Video"
+                "&Fields=Path,MediaSources,MediaStreams,ParentId,OriginalTitle,ProductionYear"
+                f"&Limit={max(1, int(limit))}&api_key=[APIKEY]"
+            )
+            try:
+                response = instance.get_data(url)
+                payload = (response.json() if response is not None else None) or {}
+            except Exception as error:
+                logger.warning(f"扫描 Emby 库失败：{type(error).__name__}: {error}")
+                continue
+            for item in payload.get("Items") or []:
+                parent = str(item.get("ParentId") or "")
+                if allowed is not None and parent not in allowed:
+                    continue
+                quality = quality_from_item(item)
+                height = int(quality.get("height") or 0)
+                if not height:
+                    continue
+                path = str(quality.get("path") or item.get("Path") or "")
+                code = self._code_from_path(path) or self._code_from_path(
+                    str(item.get("Name") or "")
+                )
+                if not code:
+                    continue
+                current = result.get(code)
+                if current is not None and int(current.get("height") or 0) >= height:
+                    continue
+                result[code] = {
+                    "server": server,
+                    "item_id": str(item.get("Id") or ""),
+                    "code": code,
+                    "title": str(item.get("Name") or ""),
+                    "path": path,
+                    "height": height,
+                    "width": int(quality.get("width") or 0),
+                    "bitrate": int(quality.get("bitrate") or 0),
+                    "size": int(quality.get("size") or 0),
+                }
+        return sorted(
+            (row for row in result.values() if int(row.get("height") or 0) < threshold),
+            key=lambda row: (row.get("height") or 0, row.get("code") or ""),
+        )
+
+    def list_items(self, limit: int = 50) -> list:
+        """列出目标库内的条目，供调试库配置。
 
         :param limit: 最多返回条数
         :return: [{server, library, item_id, title, path}]

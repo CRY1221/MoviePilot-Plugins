@@ -1,10 +1,10 @@
-"""JavRanking 本地缓存数据源。
+"""JavRanking 数据源。
 
-插件本身不访问 JavRanking（Cloudflare 会拦截直接 HTTP），只读取由
-``tools/fetch_javranking_cache.py`` 在 MP 浏览器会话里抓下来的缓存：
+读取本地缓存获取番号与详情页地址；磁力缓存缺失或超过 7 天时，
+按需直接抓取详情页并写回 ``details``：
 
 - ``videos``：番号、标题、详情页
-- ``details``：详情页解析出的磁力（可选）
+- ``details``：按需抓取并缓存的磁力
 - ``rankings``：榜单条目
 
 缓存默认放在插件数据目录的 ``javranking/javranking.db``。

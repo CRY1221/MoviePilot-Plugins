@@ -46,7 +46,6 @@ from .pipeline import (
     safe_name,
     tidy_dir,
 )
-from .library import resolution_label
 from .selector import has_chinese_sub, select
 from .source import JavBusSource, JavBusError, info_hash_of, normalize_code
 
@@ -62,10 +61,12 @@ DEFAULT_POLL_SECONDS = 10
 MIN_POLL_SECONDS = 5
 DEFAULT_CANDIDATE_TIMEOUT_MINUTES = 5
 DEFAULT_QUEUE_TIMEOUT_MINUTES = 30
+PROACTIVE_BATCH = 5
 
 # 插件重载时可能短暂出现两个服务实例，用模块级锁和通知去重兜底
 _ADVANCE_LOCK = threading.Lock()
 _NOTIFY_LOCK = threading.Lock()
+_PROACTIVE_LOCK = threading.Lock()
 _NOTIFIED: set = set()
 
 
@@ -89,7 +90,7 @@ class JavCloudDownload(_PluginBase):
     plugin_name = "番号云下载"
     plugin_desc = "按番号从 JavBus 取种，经 CloudDrive2 云下载到 115，完成后清理、改名并可移动到库目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.6.8"
+    plugin_version = "0.8.0"
     plugin_label = "工具"
     plugin_author = "CRY1221"
     plugin_config_prefix = "javclouddownload_"
@@ -124,6 +125,8 @@ class JavCloudDownload(_PluginBase):
     _emby_options: List[dict] = []
     _enable_upgrade = False
     _replace_existing = True
+    _proactive_enabled = False
+    _proactive: Dict[str, Any] = {}
     _enable_filter_rules = True
     _min_video_size_mb = 300
     _min_video_size_bytes = 300 * 1024 ** 2
@@ -166,6 +169,7 @@ class JavCloudDownload(_PluginBase):
         self._library_map = (config.get("library_map") or "").strip()
         self._enable_upgrade = bool(config.get("enable_upgrade", False))
         self._replace_existing = bool(config.get("replace_existing", True))
+        self._proactive_enabled = bool(config.get("proactive_upgrade", False))
         self._enable_filter_rules = bool(config.get("enable_filter_rules", True))
         raw_min_size = config.get("min_video_size_mb")
         self._min_video_size_mb = 300 if raw_min_size is None else max(0, int(raw_min_size))
@@ -202,6 +206,9 @@ class JavCloudDownload(_PluginBase):
 
         stored = self.get_data("tasks") or {}
         self._tasks = stored if isinstance(stored, dict) else {}
+        proactive = self.get_data("proactive") or {}
+        self._proactive = proactive if isinstance(proactive, dict) else {}
+        self._register_proactive_listener()
 
         if not self._enabled:
             self._status = "未启用"
@@ -218,10 +225,38 @@ class JavCloudDownload(_PluginBase):
         self._status = (
             f"运行中，数据源 {self._source_label()}，云下载目录 {self._download_dir}"
         )
+        state = self.get_data("proactive_state") or {}
+        if not isinstance(state, dict):
+            state = {}
+        if (
+            self._proactive_enabled
+            and self._enable_upgrade
+            and self._emby_library
+            and not state.get("enabled")
+        ):
+            state["enabled"] = True
+            state["last_scan_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.save_data("proactive_state", state)
+            threading.Thread(target=self.scan_proactive, daemon=True).start()
+        elif not self._proactive_enabled and state.get("enabled"):
+            state["enabled"] = False
+            self.save_data("proactive_state", state)
 
     def get_state(self) -> bool:
         """返回插件启用状态。"""
         return self._enabled
+
+    def _register_proactive_listener(self) -> None:
+        """注册主动洗版按钮回调；宿主不支持时只记录日志。"""
+        try:
+            from app.runtime.events import eventmanager
+            from app.schemas.types import EventType
+
+            eventmanager.add_event_listener(
+                EventType.MessageAction, self._on_message_action
+            )
+        except Exception as error:
+            logger.warning(f"注册主动洗版按钮回调失败：{type(error).__name__}: {error}")
 
     def get_service(self) -> List[Dict[str, Any]]:
         """注册离线任务推进服务。"""
@@ -329,6 +364,249 @@ class JavCloudDownload(_PluginBase):
                 self._emby_library, self._library_map
             ).cd2_dir_for(hit.server, hit.item_id)
         return hit
+
+    def _scan_low_res(self) -> List[Dict[str, Any]]:
+        """扫描 Emby 成人库中低于 1080P 的条目。"""
+        if not self._emby_library:
+            return []
+        return EmbyLibrary(
+            self._emby_library, self._library_map
+        ).list_low_res(1080)
+
+    def _save_proactive(self) -> None:
+        """保存主动洗版记录。"""
+        self.save_data("proactive", self._proactive)
+
+    def scan_proactive(self) -> Dict[str, Any]:
+        """
+        扫描低清条目并发起洗版询问。
+
+        每次最多提醒 ``PROACTIVE_BATCH`` 条；用户忽略后记录为 ``declined``，
+        后续扫描不再提醒。
+        """
+        if not self._proactive_enabled:
+            return {"ok": False, "reason": "未启用主动洗版"}
+        if not self._enabled:
+            return {"ok": False, "reason": "插件未启用"}
+        if not self._enable_upgrade:
+            return {"ok": False, "reason": "未启用洗版"}
+        if not self._emby_library:
+            return {"ok": False, "reason": "未配置 Emby 成人库"}
+        if not _PROACTIVE_LOCK.acquire(blocking=False):
+            return {"ok": False, "reason": "主动洗版扫描正在进行"}
+        try:
+            rows = self._scan_low_res()
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            current_codes = {str(row.get("code") or "") for row in rows}
+            pending: List[Dict[str, Any]] = []
+            with self._lock:
+                if rows:
+                    for code, old in list(self._proactive.items()):
+                        if (
+                            old.get("status") in ("pending", "notified", "upgrading")
+                            and code not in current_codes
+                        ):
+                            # 库内已经不再低清（例如已洗版或 Emby 更新），不再追问
+                            old["status"] = "resolved"
+                            old["updated_at"] = now
+                            self._proactive[code] = old
+                for row in rows:
+                    code = str(row.get("code") or "")
+                    if not code:
+                        continue
+                    old = self._proactive.get(code) or {}
+                    if old.get("status") in (
+                        "declined", "notified", "upgrading", "upgraded",
+                        "skipped", "failed",
+                    ):
+                        continue
+                    task = self._tasks.get(code) or {}
+                    if task.get("state") in ACTIVE_STATES:
+                        continue
+                    record = {
+                        "code": code,
+                        "title": row.get("title") or "",
+                        "path": row.get("path") or "",
+                        "item_id": row.get("item_id") or "",
+                        "height": int(row.get("height") or 0),
+                        "width": int(row.get("width") or 0),
+                        "bitrate": int(row.get("bitrate") or 0),
+                        "size": int(row.get("size") or 0),
+                        "status": "pending",
+                        "notified_at": old.get("notified_at") or "",
+                        "created_at": old.get("created_at") or now,
+                        "updated_at": now,
+                    }
+                    self._proactive[code] = record
+                    pending.append(record)
+                self._save_proactive()
+            listed = pending[:PROACTIVE_BATCH]
+            notified = 0
+            if listed and self._notify_proactive_summary(rows, pending, listed):
+                with self._lock:
+                    for record in listed:
+                        record["status"] = "notified"
+                        record["notified_at"] = now
+                        record["updated_at"] = now
+                        self._proactive[record["code"]] = record
+                    self._save_proactive()
+                notified = len(listed)
+            return {
+                "ok": True,
+                "low_res": len(rows),
+                "new": len(pending),
+                "notified": notified,
+                "items": pending,
+            }
+        except Exception as error:
+            logger.warning(f"主动洗版扫描失败：{type(error).__name__}: {error}")
+            return {"ok": False, "reason": str(error)}
+        finally:
+            _PROACTIVE_LOCK.release()
+
+    def _notify_proactive_summary(self, rows: List[Dict[str, Any]],
+                                  pending: List[Dict[str, Any]],
+                                  listed: List[Dict[str, Any]]) -> bool:
+        """发送一条汇总通知：总数 + 前 5 条列表 + 对应操作按钮。"""
+        plugin_id = self.__class__.__name__
+        lines = [
+            f"本次扫描发现 {len(rows)} 条低于 1080P，待处理 {len(pending)} 条。"
+        ]
+        for index, record in enumerate(listed, 1):
+            code = str(record.get("code") or "")
+            height = int(record.get("height") or 0)
+            width = int(record.get("width") or 0)
+            size = int(record.get("size") or 0)
+            size_text = f"，{size / 1024 ** 3:.2f}GB" if size else ""
+            dimension = f"{width}×{height}" if width else f"{height}P"
+            lines.append(f"{index}. {code} {dimension}{size_text}")
+        if len(pending) > len(listed):
+            lines.append(
+                f"仅显示前 {len(listed)} 条，其余 {len(pending) - len(listed)} 条"
+                "可在插件记录或 API 查看。"
+            )
+        buttons = []
+        for record in listed:
+            code = str(record.get("code") or "")
+            buttons.append([
+                {
+                    "text": f"洗版 {code}",
+                    "callback_data": f"[PLUGIN]{plugin_id}|proactive:upgrade:{code}",
+                },
+                {
+                    "text": f"忽略 {code}",
+                    "callback_data": f"[PLUGIN]{plugin_id}|proactive:dismiss:{code}",
+                },
+            ])
+        try:
+            self.post_message(
+                mtype=MessageType.Plugin,
+                title=f"番号云下载低清扫描：共 {len(rows)} 条",
+                text="\n".join(lines),
+                buttons=buttons,
+            )
+            return True
+        except Exception as error:
+            logger.warning(f"主动洗版提醒发送失败：{type(error).__name__}: {error}")
+            return False
+
+    def _on_message_action(self, event: Any) -> None:
+        """处理通知按钮回调。"""
+        data = getattr(event, "event_data", None) or {}
+        if hasattr(data, "model_dump"):
+            data = data.model_dump()
+        if not isinstance(data, dict):
+            return
+        plugin_id = str(data.get("plugin_id") or "")
+        if plugin_id != self.__class__.__name__:
+            return
+        text = str(data.get("text") or "")
+        parts = text.split(":", 2)
+        if len(parts) != 3 or parts[0] != "proactive":
+            return
+        self.handle_proactive_action(parts[1], parts[2])
+
+    def handle_proactive_action(self, action: str, code: str) -> Dict[str, Any]:
+        """
+        处理主动洗版的用户选择。
+
+        :param action: ``upgrade`` 或 ``dismiss``
+        :param code: 番号
+        :return: 处理结果
+        """
+        normalized = normalize_code(code)
+        if not self._enabled:
+            return {"ok": False, "reason": "插件未启用"}
+        with self._lock:
+            record = self._proactive.get(normalized)
+        if not record:
+            return {"ok": False, "reason": f"没有 {normalized} 的主动洗版记录"}
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if action == "dismiss":
+            with self._lock:
+                record["status"] = "declined"
+                record["updated_at"] = now
+                self._proactive[normalized] = record
+                self._save_proactive()
+            self.post_message(
+                mtype=MessageType.Plugin,
+                title=f"番号云下载已忽略洗版：{normalized}",
+                text=f"{normalized} 已记录，不再重复提醒。",
+            )
+            return {"ok": True, "status": "declined"}
+        if action != "upgrade":
+            return {"ok": False, "reason": f"未知操作：{action}"}
+        if not self._enable_upgrade:
+            return {"ok": False, "reason": "未启用洗版"}
+        with self._lock:
+            record["status"] = "upgrading"
+            record["updated_at"] = now
+            self._proactive[normalized] = record
+            self._save_proactive()
+        try:
+            result = self.submit(
+                [normalized], wait_seconds=0, upgrade=True, force=True
+            )
+        except Exception as error:
+            with self._lock:
+                record["status"] = "failed"
+                record["updated_at"] = now
+                record["message"] = str(error)
+                self._proactive[normalized] = record
+                self._save_proactive()
+            self.post_message(
+                mtype=MessageType.Plugin,
+                title=f"番号云下载洗版失败：{normalized}",
+                text=str(error),
+            )
+            return {"ok": False, "status": "failed", "reason": str(error)}
+        item = (result.get("items") or [{}])[0]
+        if item.get("skipped"):
+            status = "skipped"
+        elif item.get("ok"):
+            status = "upgrading"
+        else:
+            status = "failed"
+        with self._lock:
+            record["status"] = status
+            record["updated_at"] = now
+            record["message"] = item.get("reason") or item.get("state") or ""
+            self._proactive[normalized] = record
+            self._save_proactive()
+        self.post_message(
+            mtype=MessageType.Plugin,
+            title=f"番号云下载洗版：{normalized}",
+            text=(
+                f"{normalized} 洗版已提交。"
+                if status == "upgrading"
+                else f"{normalized} 未提交洗版：{item.get('reason') or status}"
+            ),
+        )
+        return {
+            "ok": bool(item.get("ok")),
+            "status": status,
+            "result": result,
+        }
 
     def _skip_record(self, record: Dict[str, Any], message: str) -> Dict[str, Any]:
         """把任务标记为跳过，不提交下载。"""
@@ -983,7 +1261,8 @@ class JavCloudDownload(_PluginBase):
         self._organize(client, record, wait_seconds)
 
     def _switch_candidate(self, client: Cd2Client, record: Dict[str, Any],
-                          reason: str, result: str = "timeout") -> None:
+                          reason: str, result: str = "timeout",
+                          exhausted_message: str = "") -> None:
         """
         删除当前候选已下载的文件和离线任务记录，然后提交下一条候选。
 
@@ -991,6 +1270,7 @@ class JavCloudDownload(_PluginBase):
         :param record: 任务记录
         :param reason: 换种原因
         :param result: 写进 candidate_attempts 的结果
+        :param exhausted_message: 所有候选耗尽时的失败说明
         :param task: 当前离线任务；None 表示列表中还没出现
         """
         folder = record.get("folder") or self._download_dir
@@ -1049,7 +1329,7 @@ class JavCloudDownload(_PluginBase):
         if next_index >= len(candidates):
             self._fail(
                 record,
-                f"{len(candidates)} 条候选均未在时限内完成",
+                exhausted_message or f"{len(candidates)} 条候选均未在时限内完成",
             )
             return
         for index in range(next_index, len(candidates)):
@@ -1193,11 +1473,22 @@ class JavCloudDownload(_PluginBase):
             self._stamp(record)
             return
 
+        candidates = record.get("candidates") or []
+        index = int(record.get("candidate_index") or 0)
+        candidate_name = ""
+        if 0 <= index < len(candidates):
+            candidate_name = candidates[index].get("name") or ""
+        if not candidate_name:
+            candidate_name = record.get("task_name") or ""
+        keep_c = has_chinese_sub(candidate_name)
+        file_base = f"{name}-C" if keep_c else name
+
         tidied = tidy_dir(
             client, target, name,
             delete_junk_only=self._delete_junk_only,
             enable_filter_rules=self._enable_filter_rules,
             min_video_size=self._min_video_size_bytes,
+            file_name=file_base,
         )
         if tidied.get("ok"):
             try:
@@ -1218,33 +1509,23 @@ class JavCloudDownload(_PluginBase):
             return
 
         final_dir = tidied["final_dir"]
-        actual = probe_media(client, tidied.get("final_file") or "")
-        if actual:
-            label = resolution_label(actual.get("height") or 0)
-            files = tidied.get("final_files") or []
-            if label and len(files) == 1:
-                old_path = files[0]
-                candidates = record.get("candidates") or []
-                index = int(record.get("candidate_index") or 0)
-                candidate_name = ""
-                if 0 <= index < len(candidates):
-                    candidate_name = candidates[index].get("name") or ""
-                if not candidate_name:
-                    candidate_name = record.get("task_name") or ""
-                keep_c = has_chinese_sub(candidate_name)
-                new_name = (
-                    f"{name}{'-C' if keep_c else ''} {label}"
-                    f"{PurePosixPath(old_path).suffix}"
-                )
-                if PurePosixPath(old_path).name != new_name:
-                    try:
-                        if client.rename(old_path, new_name):
-                            new_path = f"{PurePosixPath(old_path).parent}/{new_name}"
-                            tidied["final_file"] = new_path
-                            tidied["final_files"] = [new_path]
-                    except Cd2Error as error:
-                        logger.warning(f"按分辨率改名失败：{error}")
         existing = record.get("existing") or None
+        actual = None
+        if existing:
+            actual = probe_media(client, tidied.get("final_file") or "")
+            if actual:
+                height = int(actual.get("height") or 0)
+                if height and height < 720:
+                    reason = f"下载后真实分辨率 {height}P 低于 720P"
+                    if record.get("candidates"):
+                        self._switch_candidate(
+                            client, record, reason, result="low_quality",
+                            exhausted_message="所有候选下载后都低于 720P",
+                        )
+                    else:
+                        self._fail(record, reason)
+                    return
+                record["actual_quality"] = actual
         if existing:
             if not actual:
                 record.update({
@@ -1256,7 +1537,6 @@ class JavCloudDownload(_PluginBase):
                 })
                 self._stamp(record)
                 return
-            record["actual_quality"] = actual
             if not actual_is_better(existing.get("quality") or {}, actual):
                 try:
                     deleted = client.delete(final_dir)
@@ -1447,6 +1727,30 @@ class JavCloudDownload(_PluginBase):
                 "description": "返回插件记录的任务状态",
             },
             {
+                "path": "/proactive",
+                "endpoint": self.api_proactive,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "主动洗版记录",
+                "description": "返回低于 1080P 的库内条目与用户选择状态",
+            },
+            {
+                "path": "/proactive/scan",
+                "endpoint": self.api_proactive_scan,
+                "methods": ["POST"],
+                "auth": "apikey",
+                "summary": "立即扫描主动洗版",
+                "description": "扫描 Emby 成人库并发送低清提醒",
+            },
+            {
+                "path": "/proactive/action",
+                "endpoint": self.api_proactive_action,
+                "methods": ["POST"],
+                "auth": "apikey",
+                "summary": "处理主动洗版",
+                "description": "payload: {code, action}，action 为 upgrade 或 dismiss",
+            },
+            {
                 "path": "/probe",
                 "endpoint": self.api_probe,
                 "methods": ["GET"],
@@ -1553,6 +1857,29 @@ class JavCloudDownload(_PluginBase):
                 self._tasks.values(), key=lambda r: r.get("updated_at", ""), reverse=True
             )
         return {"ok": True, "total": len(items), "items": items}
+
+    def api_proactive(self) -> Dict[str, Any]:
+        """返回主动洗版记录。"""
+        with self._lock:
+            items = sorted(
+                self._proactive.values(),
+                key=lambda r: r.get("updated_at", ""),
+                reverse=True,
+            )
+        return {"ok": True, "total": len(items), "items": items}
+
+    def api_proactive_scan(self) -> Dict[str, Any]:
+        """立即执行一次主动洗版扫描。"""
+        return self.scan_proactive()
+
+    def api_proactive_action(self, payload: Dict[str, Any] = None) -> Dict[str, Any]:
+        """处理主动洗版选择。"""
+        payload = payload or {}
+        code = str(payload.get("code") or "").strip()
+        action = str(payload.get("action") or "").strip().lower()
+        if not code or action not in ("upgrade", "dismiss"):
+            return {"ok": False, "reason": "需要 code 和 action（upgrade/dismiss）"}
+        return self.handle_proactive_action(action, code)
 
     def api_probe(self) -> Dict[str, Any]:
         """探测 CD2 连接与权限。"""
@@ -1977,6 +2304,21 @@ class JavCloudDownload(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {
+                                            "model": "proactive_upgrade",
+                                            "label": "主动洗版提醒",
+                                            "hint": "开启后执行一次扫库，列出低于 1080P 的条目并询问；需同时开启洗版",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
                                             "model": "enable_upgrade",
                                             "label": "启用洗版",
                                             "hint": "开启后，请求洗版时才比较画质并替换",
@@ -2134,9 +2476,10 @@ class JavCloudDownload(_PluginBase):
                         "component": "VAlert",
                         "props": {"type": "info", "variant": "tonal"},
                         "text": "数据源：JavBus 直连可用；JavRanking 读取本地缓存，"
-                                "没有详情页缓存的番号无法取磁力，可改用「自动」回退 JavBus。"
-                                "选种顺序：第一会所新片 > 中文字幕 > 4K（≥5GB）> 体积最大；"
-                                "无码破解、假4K、720P 与小于阈值的小视频默认排除。"
+                                "缺少磁力时按需抓取详情页，失败回退旧缓存。"
+                                "选种顺序：中文字幕（体积需达到最大候选一半）> 4K（≥5GB）> 体积最大；"
+                                "无码破解、假4K、720P/480P 与小于阈值的小视频默认排除；"
+                                "洗版时低于 720P 自动换种。"
                                 "任务由定时服务异步推进。",
                     },
                 ],
@@ -2150,6 +2493,7 @@ class JavCloudDownload(_PluginBase):
             "library_map": "",
             "enable_upgrade": False,
             "replace_existing": True,
+            "proactive_upgrade": False,
             "enable_filter_rules": True,
             "min_video_size_mb": 300,
             "source_base": "https://www.javbus.com",
@@ -2192,6 +2536,24 @@ class JavCloudDownload(_PluginBase):
                 cache_text = f"数据源：{self._source_mode}｜JavRanking 缓存未就绪"
         except JavRankingError as error:
             cache_text = f"数据源：{self._source_mode}｜JavRanking 缓存读取失败：{error}"
+        proactive_text = ""
+        if self._proactive_enabled:
+            with self._lock:
+                records = list(self._proactive.values())
+            pending = [
+                r for r in records
+                if r.get("status") in ("pending", "notified")
+            ]
+            upgrading = [r for r in records if r.get("status") == "upgrading"]
+            declined = [r for r in records if r.get("status") == "declined"]
+            proactive_text = (
+                f"主动洗版：待处理 {len(pending)}，进行中 {len(upgrading)}，"
+                f"已忽略 {len(declined)}"
+            )
+            if pending:
+                proactive_text += "\n" + "、".join(
+                    f"{r.get('code')} {r.get('height')}P" for r in pending[:10]
+                )
         pages: List[dict] = [
             {
                 "component": "VAlert",
@@ -2204,6 +2566,14 @@ class JavCloudDownload(_PluginBase):
                 "text": cache_text,
             },
         ]
+        if proactive_text:
+            pages.append(
+                {
+                    "component": "VAlert",
+                    "props": {"type": "warning", "variant": "tonal"},
+                    "text": proactive_text,
+                }
+            )
         if lines:
             pages.append(
                 {
@@ -2217,6 +2587,16 @@ class JavCloudDownload(_PluginBase):
     def stop_service(self) -> None:
         """停止服务并落盘任务记录。"""
         try:
+            from app.runtime.events import eventmanager
+            from app.schemas.types import EventType
+
+            eventmanager.remove_event_listener(
+                EventType.MessageAction, self._on_message_action
+            )
+        except Exception:
+            pass
+        try:
             self._persist()
+            self._save_proactive()
         except Exception as error:  # pragma: no cover - 落盘失败不应阻断卸载
             logger.warning(f"番号云下载保存任务记录失败：{error}")

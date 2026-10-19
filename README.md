@@ -5,12 +5,12 @@
 ## 番号云下载 · JavCloudDownload
 
 按番号从 JavBus / JavRanking 取种，经 CloudDrive2 gRPC 提交 115 离线下载；落盘后清理广告文件、
-按番号+分辨率重命名，可选洗版，并按配置移动到 Emby 库目录。
+按番号[-C] 重命名，可选洗版与主动低清扫库，并按配置移动到 Emby 库目录。
 
 - 代码：`plugins.v3/javclouddownload/`
 - 清单：`package.v3.json` 中的 `JavCloudDownload`
 - 依赖：`clouddrive2-client==0.3.0`、`grpcio~=1.80.0`、`protobuf>=6.31.1,<7`
-- 当前版本：`0.6.8`
+- 当前版本：`0.8.0`
 - 运行基线：MoviePilot `v3.1.8`
 
 配置项包括 CloudDrive2 地址与令牌、云下载目录、库目录、是否移动、是否允许无码破解资源、
@@ -37,6 +37,20 @@
 - 下载后用 ffprobe 复核真实分辨率与码率；
 - 确认更好才删除旧视频并替换，旧片目录内有多个视频时只删除目标文件；
 - 支持 Emby 路径到 CD2 路径的目录映射。
+
+普通下载不做 ffprobe；只有洗版任务才探测真实分辨率。
+
+## 主动洗版
+
+一次性扫描 Emby 成人库，不做长期轮询：
+
+- 打开「主动洗版提醒」且已启用洗版后，保存配置触发一次扫库；
+- 读取 Emby `MediaSources` / `MediaStreams`，找出低于 1080P 的条目；
+- 发一条汇总通知：总数 + 前 5 条番号/分辨率/体积；
+- 前 5 条带「洗版 / 忽略」按钮，忽略后不再提醒；
+- 其余保持 `pending`，可再次调用 `POST /api/v1/plugin/JavCloudDownload/proactive/scan` 继续处理。
+
+详见 [`docs/proactive-upgrade.md`](docs/proactive-upgrade.md)。
 
 ## 已归档
 

@@ -1,13 +1,14 @@
 {
   "JavCloudDownload": {
     "name": "番号云下载",
-    "description": "按番号从 JavBus / JavRanking 取种，经 CloudDrive2 提交 115 离线下载；完成后清理、按番号+分辨率改名、可选洗版并移动到 Emby 库目录。",
-    "version": "0.6.8",
+    "description": "按番号从 JavBus / JavRanking 取种，经 CloudDrive2 提交 115 离线下载；完成后清理、按番号[-C] 重命名，可选洗版、主动低清扫库并移动到 Emby 库目录。",
+    "version": "0.8.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "CRY1221",
     "level": 1,
     "system_version": ">=3.1.8",
     "history": {
+      "v0.8.0": "主动洗版改为一次性扫库：汇总通知低清数量并列出前 5 条，忽略后不再提醒；普通下载不再跑 ffprobe；选种移除第一会所优先，改为中文字幕（体积≥最大候选一半）> 4K > 体积，排除 480P；重命名改为番号[-C]，多段使用 part1/part2。",
       "v0.6.8": "修复整理后残留空目录；落盘失败前强制刷新 CD2 目录；通知区分下载完成与整理失败；超时换种自动清理 115 离线任务记录。",
       "v0.6.0": "种子来源改为勾选框，支持 JavBus 与 JavRanking 并行；JavRanking 按需抓取磁力并缓存；全站请求最小间隔 3 秒。",
       "v0.5.0": "新增可选洗版：Emby 库基线、目录映射、真实分辨率与码率复核、文件级替换；Emby 库改为下拉选择。",
