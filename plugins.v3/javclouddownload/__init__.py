@@ -46,7 +46,7 @@ class JavCloudDownload(_PluginBase):
     plugin_name = "番号云下载"
     plugin_desc = "按番号从 JavBus 取种，经 CloudDrive2 云下载到 115，完成后清理、改名并可移动到库目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.1.7"
+    plugin_version = "0.1.8"
     plugin_label = "工具"
     plugin_author = "CRY1221"
     plugin_config_prefix = "javclouddownload_"
@@ -60,7 +60,7 @@ class JavCloudDownload(_PluginBase):
     _cd2_token = ""
     _cd2_username = ""
     _cd2_password = ""
-    _download_dir = "/115open/云下载"
+    _download_dir = ""
     _library_dir = ""
     _move_enabled = False
     _allow_uncensored = False
@@ -106,7 +106,7 @@ class JavCloudDownload(_PluginBase):
         self._cd2_token = (config.get("cd2_token") or "").strip()
         self._cd2_username = (config.get("cd2_username") or "").strip()
         self._cd2_password = (config.get("cd2_password") or "").strip()
-        self._download_dir = (config.get("download_dir") or "/115open/云下载").rstrip("/")
+        self._download_dir = (config.get("download_dir") or "").strip().rstrip("/")
         self._library_dir = (config.get("library_dir") or "").strip().rstrip("/")
         self._move_enabled = bool(config.get("move_to_library"))
         self._allow_uncensored = bool(config.get("allow_uncensored"))
@@ -122,10 +122,13 @@ class JavCloudDownload(_PluginBase):
             self._status = "未启用"
             return
         if not self._cd2_host:
-            self._status = "配置不完整：缺少 CloudDrive2 地址"
+            self._status = "配置不完整：缺少 CloudDrive2 地址，请在设置中填写"
             return
         if not self._cd2_token and not self._cd2_username:
             self._status = "配置不完整：需要 API 令牌或账号密码"
+            return
+        if not self._download_dir:
+            self._status = "配置不完整：缺少云下载目录，请在设置中填写"
             return
         self._status = (
             f"运行中，数据源 {self._source_mode}，云下载目录 {self._download_dir}"
@@ -304,6 +307,8 @@ class JavCloudDownload(_PluginBase):
         chosen = detail.get("chosen")
         if not chosen:
             raise JavBusError(f"{code} 没有可用磁力")
+        if not self._download_dir:
+            raise Cd2Error("未配置云下载目录，请先在插件设置中填写")
         name = safe_name(detail.get("code") or code)
         record = self._tasks.get(code) or self._new_record(code, name)
         record.update(
@@ -902,7 +907,9 @@ class JavCloudDownload(_PluginBase):
                                         "props": {
                                             "model": "cd2_host",
                                             "label": "CloudDrive2 地址",
-                                            "placeholder": "192.168.5.103",
+                                            "placeholder": "填写 CloudDrive2 的 IP 地址或域名",
+                                            "hint": "必填，填写运行 CloudDrive2 的设备地址",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],
@@ -996,7 +1003,9 @@ class JavCloudDownload(_PluginBase):
                                         "props": {
                                             "model": "download_dir",
                                             "label": "云下载目录",
-                                            "placeholder": "/115open/云下载",
+                                            "placeholder": "填写 CD2 中的下载目录",
+                                            "hint": "必填，例如 /CloudDrive/下载；请按你的 CD2 挂载路径填写",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],
@@ -1015,7 +1024,9 @@ class JavCloudDownload(_PluginBase):
                                         "props": {
                                             "model": "library_dir",
                                             "label": "库目录（开启移动后生效）",
-                                            "placeholder": "/115open/adult",
+                                            "placeholder": "填写 CD2 中的库目录",
+                                            "hint": "开启移动后必填，例如 /CloudDrive/媒体库",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],
@@ -1086,12 +1097,12 @@ class JavCloudDownload(_PluginBase):
             "enable_filter_rules": True,
             "min_video_size_mb": 300,
             "source_base": "https://www.javbus.com",
-            "cd2_host": "192.168.5.103",
+            "cd2_host": "",
             "cd2_port": 19798,
             "cd2_token": "",
             "cd2_username": "",
             "cd2_password": "",
-            "download_dir": "/115open/云下载",
+            "download_dir": "",
             "library_dir": "",
             "move_to_library": False,
             "allow_uncensored": False,

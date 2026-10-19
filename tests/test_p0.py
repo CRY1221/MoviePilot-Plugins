@@ -298,6 +298,28 @@ inst._store["tasks"] = {"ABC-123": {"code": "ABC-123", "state": "failed"}}
 inst.init_plugin({"enabled": False})
 check("init_plugin 保留已存任务", inst._store["tasks"].get("ABC-123") is not None, repr(inst._store))
 
+fresh = jcd.JavCloudDownload()
+check("默认配置不含个人 CD2 地址", fresh._cd2_host == "", fresh._cd2_host)
+check("默认配置不含个人下载目录", fresh._download_dir == "", fresh._download_dir)
+
+missing_dir = jcd.JavCloudDownload()
+missing_dir.init_plugin({"enabled": True, "cd2_host": "cd2.example.com", "cd2_token": "x"})
+check("缺少下载目录时给出提醒", "缺少云下载目录" in missing_dir._status, missing_dir._status)
+
+missing_host = jcd.JavCloudDownload()
+missing_host.init_plugin({"enabled": True, "download_dir": "/cloud/download", "cd2_token": "x"})
+check("缺少 CD2 地址时给出提醒", "缺少 CloudDrive2 地址" in missing_host._status, missing_host._status)
+
+no_dir_submit = jcd.JavCloudDownload()
+no_dir_submit.init_plugin({"enabled": True, "cd2_host": "cd2.example.com", "cd2_token": "x"})
+no_dir_submit.preview = lambda code: {"code": code, "chosen": {"magnet": "magnet:?xt=urn:btih:" + "0" * 40}}
+try:
+    no_dir_submit._submit_one("ABC-123", 0)
+    blocked = False
+except jcd.Cd2Error as error:
+    blocked = "云下载目录" in str(error)
+check("未配置下载目录时拒绝提交", blocked, "未拦截")
+
 inst2 = jcd.JavCloudDownload()
 inst2._max_wait_minutes = 1
 record = {
