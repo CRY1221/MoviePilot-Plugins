@@ -24,6 +24,7 @@ STATE_DOWNLOADING = "downloading"
 STATE_FINISHED = "finished"
 STATE_ORGANIZED = "organized"
 STATE_MOVED = "moved"
+STATE_SKIPPED = "skipped"
 STATE_FAILED = "failed"
 
 ACTIVE_STATES = (STATE_PENDING, STATE_SUBMITTED, STATE_DOWNLOADING, STATE_FINISHED)
@@ -158,23 +159,51 @@ def collect_files(client: Cd2Client, path: str, depth: int = 2) -> List[tuple]:
 
 
 def locate_download_dir(client: Cd2Client, folder: str, name: str,
-                        task_name: str = "") -> Optional[str]:
+                        task_name: str = "",
+                        force_refresh: bool = False) -> Optional[str]:
     """
     在云下载目录下定位任务落盘目录。
 
     优先使用离线任务名对应目录：同一番号重复下载时，旧目录可能仍存在，
     若先匹配番号会整理到上一次的目录，遗漏本次下载内容。
+    ``force_refresh`` 会绕过 CD2 目录缓存重新列举，用于任务刚完成时。
 
     :param client: CD2 客户端
     :param folder: 云下载根目录
     :param name: 目标番号名
     :param task_name: 离线任务名（目录名可能与番号不同）
+    :param force_refresh: 是否强制刷新目录列表
     :return: 实际目录路径；未找到返回 None
     """
     for candidate in filter(None, (task_name, name)):
         path = f"{folder.rstrip('/')}/{candidate}"
         if client.find(path) is not None:
             return path
+    if not force_refresh:
+        return None
+    try:
+        entries = client.list_dir(folder, force_refresh=True)
+    except Cd2Error:
+        return None
+    wanted = {
+        str(candidate).strip().lower()
+        for candidate in (task_name, name) if candidate
+    }
+    for entry in entries:
+        if getattr(entry, "isDirectory", False) and (
+            str(entry.name or "").strip().lower() in wanted
+        ):
+            return f"{folder.rstrip('/')}/{entry.name}"
+    code = (name or "").lower()
+    if code:
+        pattern = re.compile(
+            rf"(?<![a-z0-9]){re.escape(code)}(?![0-9])", re.I
+        )
+        for entry in entries:
+            if getattr(entry, "isDirectory", False) and pattern.search(
+                str(entry.name or "")
+            ):
+                return f"{folder.rstrip('/')}/{entry.name}"
     return None
 
 
@@ -191,6 +220,41 @@ def dir_has_video(client: Cd2Client, path: str) -> bool:
     except Cd2Error:
         return False
     return pick_video(files) is not None
+
+
+def remove_empty_dirs(client: Cd2Client, root: str, depth: int = 4) -> List[str]:
+    """
+    递归删除整理后残留的空目录。
+
+    :param client: CD2 客户端
+    :param root: 整理后的目录
+    :param depth: 最大递归层数
+    :return: 已删除的目录路径
+    """
+    removed: List[str] = []
+
+    def walk(path: str, level: int) -> None:
+        if level < 0:
+            return
+        try:
+            entries = client.list_dir(path, force_refresh=True)
+        except Cd2Error:
+            return
+        for entry in entries:
+            if not getattr(entry, "isDirectory", False):
+                continue
+            child = f"{path.rstrip('/')}/{entry.name}"
+            walk(child, level - 1)
+            try:
+                if client.list_dir(child, force_refresh=True):
+                    continue
+                if client.delete(child):
+                    removed.append(child)
+            except Cd2Error:
+                continue
+
+    walk(root.rstrip("/"), depth)
+    return removed
 
 
 def tidy_dir(client: Cd2Client, target: str, name: str,
@@ -351,29 +415,125 @@ def tidy_dir(client: Cd2Client, target: str, name: str,
     }
 
 
-def move_dir(client: Cd2Client, source_dir: str, dest_parent: str) -> Dict[str, Any]:
+def move_dir(client: Cd2Client, source_dir: str, dest_parent: str,
+             replace: bool = False, dest_dir: str = "") -> Dict[str, Any]:
     """
     把整理完成的目录移动到目标父目录。
 
     :param client: CD2 客户端
     :param source_dir: 源目录
     :param dest_parent: 目标父目录
+    :param replace: 目标已存在时是否删除旧目录后替换
+    :param dest_dir: 指定完整目标目录；为空时用 dest_parent/源目录名
     :return: 移动结果
     """
     name = source_dir.rstrip("/").split("/")[-1]
-    dest = f"{dest_parent.rstrip('/')}/{name}"
+    if dest_dir:
+        dest = dest_dir.rstrip("/")
+        dest_parent = dest.rsplit("/", 1)[0]
+        if dest.rsplit("/", 1)[-1] != name:
+            return {"ok": False, "reason": "目标目录名与源目录名不一致", "final_dir": dest}
+    else:
+        dest = f"{dest_parent.rstrip('/')}/{name}"
     if source_dir.rstrip("/") == dest:
         return {"ok": True, "skipped": True, "final_dir": dest}
     try:
         existing = client.find(dest)
         if existing is not None:
-            logger.warning(f"目标已存在，跳过移动：{dest}")
-            return {"ok": False, "reason": "目标已存在", "final_dir": dest}
+            if not replace:
+                logger.warning(f"目标已存在，跳过移动：{dest}")
+                return {"ok": False, "reason": "目标已存在", "final_dir": dest}
+            if not client.delete(dest):
+                return {"ok": False, "reason": "删除目标失败", "final_dir": dest}
+            if client.find(dest) is not None:
+                return {"ok": False, "reason": "删除目标后仍存在", "final_dir": dest}
         if client.move([source_dir], dest_parent, overwrite=False):
             return {"ok": True, "final_dir": dest}
     except Cd2Error as error:
         return {"ok": False, "reason": str(error)}
     return {"ok": False, "reason": "移动未返回成功"}
+
+
+def replace_existing_files(client: Cd2Client, source_dir: str, dest_dir: str,
+                           final_files: List[str], old_name: str = "",
+                           code: str = "") -> Dict[str, Any]:
+    """
+    洗版替换旧片：目录内只有目标视频时替换整个目录，否则只删目标视频。
+
+    :param client: CD2 客户端
+    :param source_dir: 新片整理后的目录
+    :param dest_dir: 旧片所在目录
+    :param final_files: 新片文件完整路径
+    :param old_name: 旧片文件名；为空时按番号匹配
+    :param code: 番号，用于兜底匹配旧片
+    :return: 移动结果
+    """
+    names = [PurePosixPath(path).name for path in (final_files or []) if path]
+    if not names:
+        return {"ok": False, "reason": "新片文件列表为空", "final_dir": dest_dir}
+    try:
+        entries = client.list_dir(dest_dir)
+    except Cd2Error as error:
+        return {"ok": False, "reason": str(error), "final_dir": dest_dir}
+    videos = [
+        entry for entry in entries
+        if not getattr(entry, "isDirectory", False)
+        and PurePosixPath(entry.name).suffix.lower() in VIDEO_EXT_SET
+    ]
+    target = None
+    wanted = (old_name or "").lower()
+    if wanted:
+        target = next(
+            (item for item in videos if item.name.lower() == wanted), None
+        )
+    if target is None and code:
+        matches = [item for item in videos if code.lower() in item.name.lower()]
+        if len(matches) == 1:
+            target = matches[0]
+    if target is None:
+        return {
+            "ok": False,
+            "reason": "未找到旧视频文件，未删除任何内容",
+            "final_dir": dest_dir,
+        }
+    others = [item for item in videos if item.name != target.name]
+    if not others:
+        # 目录里只有这一个视频，整目录替换
+        return move_dir(client, source_dir, dest_dir, replace=True, dest_dir=dest_dir)
+    old_path = f"{dest_dir.rstrip('/')}/{target.name}"
+    try:
+        if not client.delete(old_path):
+            return {"ok": False, "reason": "删除旧视频失败", "final_dir": dest_dir}
+    except Cd2Error as error:
+        return {"ok": False, "reason": str(error), "final_dir": dest_dir}
+    new_name = names[0]
+    if len(names) == 1 and PurePosixPath(new_name).suffix.lower() == PurePosixPath(target.name).suffix.lower() \
+            and new_name != target.name:
+        try:
+            if client.rename(f"{source_dir.rstrip('/')}/{new_name}", target.name):
+                new_name = target.name
+        except Cd2Error as error:
+            logger.warning(f"洗版改名失败，保留新文件名：{error}")
+    paths = [f"{source_dir.rstrip('/')}/{name}" for name in names]
+    if new_name != names[0]:
+        paths[0] = f"{source_dir.rstrip('/')}/{new_name}"
+    try:
+        if not client.move(paths, dest_dir, overwrite=False):
+            return {"ok": False, "reason": "移动新片失败", "final_dir": dest_dir}
+    except Cd2Error as error:
+        return {"ok": False, "reason": str(error), "final_dir": dest_dir}
+    try:
+        if not client.list_dir(source_dir):
+            client.delete(source_dir)
+    except Cd2Error:
+        pass
+    return {
+        "ok": True,
+        "final_dir": dest_dir,
+        "final_files": [f"{dest_dir.rstrip('/')}/{name}" for name in
+                        ([new_name] + names[1:])],
+        "kept_other_videos": len(others),
+    }
 
 
 def wait_offline(client: Cd2Client, folder: str, info_hash: str, name: str,

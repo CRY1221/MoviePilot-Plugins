@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
+import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
@@ -18,6 +21,14 @@ from app.schemas.types import MessageType
 
 from .cd2 import Cd2Client, Cd2Error, status_name
 from .javranking import JavRankingError, JavRankingSource
+from .library import (
+    EmbyLibrary,
+    actual_is_better,
+    candidate_may_be_better,
+    estimate_candidate_quality,
+    probe_media,
+    quality_from_item,
+)
 from .pipeline import (
     ACTIVE_STATES,
     STATE_DOWNLOADING,
@@ -25,14 +36,18 @@ from .pipeline import (
     STATE_FINISHED,
     STATE_MOVED,
     STATE_ORGANIZED,
+    STATE_SKIPPED,
     STATE_SUBMITTED,
     dir_has_video,
     locate_download_dir,
     move_dir,
+    remove_empty_dirs,
+    replace_existing_files,
     safe_name,
     tidy_dir,
 )
-from .selector import select
+from .library import resolution_label
+from .selector import has_chinese_sub, select
 from .source import JavBusSource, JavBusError, info_hash_of, normalize_code
 
 MAX_RECORDS = 200
@@ -46,7 +61,25 @@ MAX_REMOVE_ATTEMPTS = 3
 DEFAULT_POLL_SECONDS = 10
 MIN_POLL_SECONDS = 5
 DEFAULT_CANDIDATE_TIMEOUT_MINUTES = 5
-DEFAULT_QUEUE_TIMEOUT_MINUTES = 10
+DEFAULT_QUEUE_TIMEOUT_MINUTES = 30
+
+# 插件重载时可能短暂出现两个服务实例，用模块级锁和通知去重兜底
+_ADVANCE_LOCK = threading.Lock()
+_NOTIFY_LOCK = threading.Lock()
+_NOTIFIED: set = set()
+
+
+def _already_notified(kind: str, record: Dict[str, Any]) -> bool:
+    """同一任务同一候选只发一次同类通知。"""
+    key = (kind, record.get("code"), record.get("info_hash") or "")
+    with _NOTIFY_LOCK:
+        if key in _NOTIFIED:
+            return True
+        _NOTIFIED.add(key)
+        if len(_NOTIFIED) > 2000:
+            _NOTIFIED.clear()
+            _NOTIFIED.add(key)
+        return False
 DEFAULT_MAX_CANDIDATES = 3
 
 
@@ -56,7 +89,7 @@ class JavCloudDownload(_PluginBase):
     plugin_name = "番号云下载"
     plugin_desc = "按番号从 JavBus 取种，经 CloudDrive2 云下载到 115，完成后清理、改名并可移动到库目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.2.4"
+    plugin_version = "0.6.8"
     plugin_label = "工具"
     plugin_author = "CRY1221"
     plugin_config_prefix = "javclouddownload_"
@@ -82,7 +115,15 @@ class JavCloudDownload(_PluginBase):
     _max_candidates = DEFAULT_MAX_CANDIDATES
     _max_wait_minutes = 240
     _source_mode = "javbus"
+    _use_javbus = True
+    _use_javranking = False
     _javranking_dir = ""
+    _emby_library = ""
+    _library_map = ""
+    _emby_options_at = 0.0
+    _emby_options: List[dict] = []
+    _enable_upgrade = False
+    _replace_existing = True
     _enable_filter_rules = True
     _min_video_size_mb = 300
     _min_video_size_bytes = 300 * 1024 ** 2
@@ -106,11 +147,25 @@ class JavCloudDownload(_PluginBase):
         config = config or {}
         self._enabled = bool(config.get("enabled"))
         self._source_base = (config.get("source_base") or "https://www.javbus.com").strip()
-        self._source_mode = (config.get("source_mode") or "javbus").strip().lower()
-        if self._source_mode not in ("javbus", "javranking", "auto"):
+        if "use_javbus" in config or "use_javranking" in config:
+            self._use_javbus = bool(config.get("use_javbus", True))
+            self._use_javranking = bool(config.get("use_javranking", False))
+        else:
+            mode = (config.get("source_mode") or "javbus").strip().lower()
+            self._use_javbus = mode in ("javbus", "auto")
+            self._use_javranking = mode == "javranking"
+        if self._use_javbus and self._use_javranking:
+            self._source_mode = "auto"
+        elif self._use_javranking:
+            self._source_mode = "javranking"
+        else:
             self._source_mode = "javbus"
         default_cache = str(Path(self.get_data_path()) / "javranking")
         self._javranking_dir = (config.get("javranking_dir") or default_cache).strip()
+        self._emby_library = (config.get("emby_library") or "").strip()
+        self._library_map = (config.get("library_map") or "").strip()
+        self._enable_upgrade = bool(config.get("enable_upgrade", False))
+        self._replace_existing = bool(config.get("replace_existing", True))
         self._enable_filter_rules = bool(config.get("enable_filter_rules", True))
         raw_min_size = config.get("min_video_size_mb")
         self._min_video_size_mb = 300 if raw_min_size is None else max(0, int(raw_min_size))
@@ -161,7 +216,7 @@ class JavCloudDownload(_PluginBase):
             self._status = "配置不完整：缺少云下载目录，请在设置中填写"
             return
         self._status = (
-            f"运行中，数据源 {self._source_mode}，云下载目录 {self._download_dir}"
+            f"运行中，数据源 {self._source_label()}，云下载目录 {self._download_dir}"
         )
 
     def get_state(self) -> bool:
@@ -228,10 +283,67 @@ class JavCloudDownload(_PluginBase):
             "candidate_index": -1,
             "candidate_started_at": "",
             "candidate_attempts": [],
+            "existing": None,
+            "actual_quality": None,
             "notified_finish": False,
             "notified_failure": False,
             "message": "",
         }
+
+    def _find_library_item(self, code: str):
+        """查询 Emby 成人库；必要时用 CD2 ffprobe 补真实质量。"""
+        try:
+            hit = EmbyLibrary(self._emby_library, self._library_map).find_item(code)
+        except Exception as error:
+            logger.warning(f"Emby 库检查失败：{type(error).__name__}: {error}")
+            return None
+        if hit is None:
+            return None
+        quality = dict(hit.quality or {})
+        if (not quality.get("height") or not quality.get("size")) and hit.item_id:
+            detail = EmbyLibrary(self._emby_library, self._library_map).get_item_detail(
+                hit.server, hit.item_id
+            )
+            if detail:
+                detailed = quality_from_item(detail)
+                quality.update({k: v for k, v in detailed.items() if v})
+        if (not quality.get("height") or not quality.get("size")) and hit.path:
+            client = None
+            try:
+                client = self._client()
+                probed = probe_media(client, hit.path)
+                if probed:
+                    quality.update({k: v for k, v in probed.items() if v})
+            except Exception as error:
+                logger.warning(f"库内文件 ffprobe 失败：{type(error).__name__}: {error}")
+            finally:
+                if client is not None:
+                    client.close()
+        hit.quality = quality
+        if not hit.relative_dir and not hit.cd2_dir:
+            hit.relative_dir = EmbyLibrary(
+                self._emby_library, self._library_map
+            ).relative_dir_for(hit.server, hit.item_id)
+        if not hit.cd2_dir:
+            hit.cd2_dir = EmbyLibrary(
+                self._emby_library, self._library_map
+            ).cd2_dir_for(hit.server, hit.item_id)
+        return hit
+
+    def _skip_record(self, record: Dict[str, Any], message: str) -> Dict[str, Any]:
+        """把任务标记为跳过，不提交下载。"""
+        record.update({"state": STATE_SKIPPED, "message": message})
+        self._stamp(record)
+        with self._lock:
+            self._tasks[record["code"]] = record
+        return {
+            "code": record["code"],
+            "ok": True,
+            "skipped": True,
+            "name": record.get("name"),
+            "reason": message,
+        }
+
 
     @staticmethod
     def _elapsed_minutes(value: str) -> float:
@@ -247,13 +359,16 @@ class JavCloudDownload(_PluginBase):
             return 0.0
         return (datetime.now() - started).total_seconds() / 60
 
-    def _prepare_candidates(self, detail: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _prepare_candidates(self, detail: Dict[str, Any],
+                            limit: Optional[int] = None
+                            ) -> List[Dict[str, Any]]:
         """
         把选种结果整理成可重试的候选列表。
 
         按 infoHash 去重，最多保留 ``max_candidates`` 条。
 
         :param detail: ``preview`` 返回的详情
+        :param limit: 最多保留条数；为空时用配置的 max_candidates
         :return: 候选列表
         """
         raw = list(detail.get("candidates") or [])
@@ -261,6 +376,7 @@ class JavCloudDownload(_PluginBase):
         if chosen and chosen not in raw:
             raw.insert(0, chosen)
 
+        max_count = max(1, int(limit if limit is not None else self._max_candidates))
         result: List[Dict[str, Any]] = []
         seen = set()
         for item in raw:
@@ -280,7 +396,7 @@ class JavCloudDownload(_PluginBase):
                     "size_text": item.get("size_text") or "",
                 }
             )
-            if len(result) >= self._max_candidates:
+            if len(result) >= max_count:
                 break
         return result
 
@@ -364,6 +480,9 @@ class JavCloudDownload(_PluginBase):
         """发送一次下载完成通知。"""
         if record.get("notified_finish"):
             return
+        if _already_notified("finish", record):
+            record["notified_finish"] = True
+            return
         record["notified_finish"] = True
         try:
             self.post_message(
@@ -371,7 +490,7 @@ class JavCloudDownload(_PluginBase):
                 title=f"番号云下载完成：{record.get('code')}",
                 text=(
                     f"{record.get('name') or record.get('code')} "
-                    f"{record.get('size_text') or ''} 已下载完成，开始整理"
+                    f"{record.get('size_text') or ''} 已下载完成，开始整理（尚未入库）"
                 ).strip(),
             )
         except Exception as error:  # 通知失败不影响下载与整理
@@ -381,15 +500,43 @@ class JavCloudDownload(_PluginBase):
         """发送一次最终失败通知。"""
         if record.get("notified_failure"):
             return
+        if _already_notified("failure", record):
+            record["notified_failure"] = True
+            return
         record["notified_failure"] = True
         try:
             self.post_message(
                 mtype=MessageType.Plugin,
                 title=f"番号云下载失败：{record.get('code')}",
-                text=f"{record.get('name') or record.get('code')}：{message}",
+                text=(
+                    f"{record.get('name') or record.get('code')} "
+                    f"{record.get('size_text') or ''}：{message}"
+                ).strip(),
             )
         except Exception as error:
             logger.warning(f"番号云下载失败通知发送失败：{error}")
+
+    def _notify_organize_failure(self, record: Dict[str, Any],
+                                  message: str) -> None:
+        """整理/落盘失败时单独通知，避免被理解成下载失败。"""
+        if record.get("notified_failure"):
+            return
+        if _already_notified("organize_failure", record):
+            record["notified_failure"] = True
+            return
+        record["notified_failure"] = True
+        try:
+            self.post_message(
+                mtype=MessageType.Plugin,
+                title=f"番号云下载整理失败：{record.get('code')}",
+                text=(
+                    f"{record.get('name') or record.get('code')} "
+                    f"{record.get('size_text') or ''} 已下载完成，"
+                    f"但整理/落盘失败：{message}"
+                ).strip(),
+            )
+        except Exception as error:
+            logger.warning(f"番号云下载整理失败通知发送失败：{error}")
 
     def _fail(self, record: Dict[str, Any], message: str) -> None:
         """把任务标记为最终失败并发通知。"""
@@ -399,41 +546,89 @@ class JavCloudDownload(_PluginBase):
 
     # ---------- 核心动作 ----------
 
+    def _source_label(self) -> str:
+        """返回当前勾选的来源名称。"""
+        names = []
+        if self._use_javbus:
+            names.append("JavBus")
+        if self._use_javranking:
+            names.append("JavRanking")
+        return "+".join(names) or "未选择"
+
     def _fetch_detail(self, code: str) -> Dict[str, Any]:
         """
-        按配置的数据源读取番号详情。
+        按勾选的来源读取番号详情，合并磁力并按 infoHash 去重。
 
-        ``auto`` 优先用 JavRanking 缓存；缓存没有磁力或不可用时回退 JavBus。
+        JavRanking 勾选后，本地缓存没有磁力时会按需抓取详情页；
+        两个来源都勾选时，任一失败仍可使用另一个。
 
         :param code: 番号
         :return: 详情字典
         """
         normalized = normalize_code(code)
-        if self._source_mode in ("javranking", "auto"):
-            try:
-                detail = JavRankingSource(self._javranking_dir).fetch_detail(normalized)
-                if self._source_mode == "javranking":
-                    if not detail.get("magnets"):
-                        raise JavRankingError(
-                            f"JavRanking 缓存没有 {normalized} 的磁力；"
-                            "请先刷新详情页，或把数据源改为 auto/javbus"
-                        )
-                    return detail
-                if detail.get("magnets"):
-                    return detail
-                logger.info(f"JavRanking 缓存无磁力，回退 JavBus：{normalized}")
-            except JavRankingError as error:
-                if self._source_mode == "javranking":
-                    raise
-                logger.info(f"JavRanking 缓存不可用，回退 JavBus：{error}")
+        if not self._use_javbus and not self._use_javranking:
+            raise JavBusError("未勾选任何种子来源")
+        def load_ranking() -> Dict[str, Any]:
+            return JavRankingSource(self._javranking_dir).fetch_remote_detail(
+                normalized
+            )
 
-        source = JavBusSource(base_url=self._source_base)
-        try:
-            detail = source.fetch_detail(normalized)
-            detail["source"] = "javbus"
-            return detail
-        finally:
-            source.close()
+        def load_javbus() -> Dict[str, Any]:
+            source = JavBusSource(base_url=self._source_base)
+            try:
+                detail = source.fetch_detail(normalized)
+                detail["source"] = "javbus"
+                return detail
+            finally:
+                source.close()
+
+        loaded: List[tuple] = []
+        errors: List[str] = []
+        futures = {}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            if self._use_javranking:
+                futures[pool.submit(load_ranking)] = "JavRanking"
+            if self._use_javbus:
+                futures[pool.submit(load_javbus)] = "JavBus"
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    loaded.append((name, future.result()))
+                except Exception as error:
+                    errors.append(f"{name}：{error}")
+                    logger.info(f"{name} 获取失败：{error}")
+        loaded.sort(key=lambda item: 0 if item[0] == "JavRanking" else 1)
+        details = [detail for _, detail in loaded]
+        if not details:
+            raise JavBusError("；".join(errors) or f"{normalized} 没有可用来源")
+        base = dict(details[0])
+        magnets: List[Dict[str, Any]] = []
+        seen = set()
+        for detail in details:
+            for magnet in detail.get("magnets") or []:
+                info_hash = (
+                    magnet.get("info_hash")
+                    or info_hash_of(magnet.get("magnet") or "")
+                ).lower()
+                if info_hash and info_hash in seen:
+                    continue
+                if info_hash:
+                    seen.add(info_hash)
+                magnets.append(magnet)
+        base["magnets"] = magnets
+        base["has_magnets"] = bool(magnets)
+        base["source"] = "+".join(
+            str(detail.get("source") or "") for detail in details
+            if detail.get("source") and detail.get("magnets")
+        )
+        for key in ("title", "release_date", "duration", "detail_url"):
+            if not base.get(key):
+                base[key] = next(
+                    (detail.get(key) for detail in details if detail.get(key)), ""
+                )
+        if not magnets:
+            raise JavBusError("；".join(errors) or f"{normalized} 没有可用磁力")
+        return base
 
     def preview(self, code: str) -> Dict[str, Any]:
         """
@@ -465,7 +660,8 @@ class JavCloudDownload(_PluginBase):
             "candidates": (picked.get("candidates") or [])[:20],
         }
 
-    def submit(self, codes: List[str], wait_seconds: int = 0) -> Dict[str, Any]:
+    def submit(self, codes: List[str], wait_seconds: int = 0,
+               upgrade: bool = False, force: bool = False) -> Dict[str, Any]:
         """
         提交番号云下载任务。
 
@@ -474,6 +670,8 @@ class JavCloudDownload(_PluginBase):
 
         :param codes: 番号列表
         :param wait_seconds: 同步等待秒数，0 表示不等待
+        :param upgrade: 是否请求洗版；仅在插件启用洗版时生效
+        :param force: 强制洗版，跳过下载前粗筛；下载后仍会 ffprobe 复核
         :return: 每个番号的处理结果
         """
         results: List[Dict[str, Any]] = []
@@ -482,7 +680,9 @@ class JavCloudDownload(_PluginBase):
             if not normalized:
                 continue
             try:
-                results.append(self._submit_one(normalized, wait_seconds))
+                results.append(
+                    self._submit_one(normalized, wait_seconds, upgrade, force)
+                )
             except Exception as error:
                 logger.error(
                     f"番号云下载提交失败 {normalized}：{type(error).__name__}: {error}"
@@ -497,24 +697,76 @@ class JavCloudDownload(_PluginBase):
         self._persist()
         return {"ok": all(item.get("ok", True) for item in results), "items": results}
 
-    def _submit_one(self, code: str, wait_seconds: int) -> Dict[str, Any]:
+    def _submit_one(self, code: str, wait_seconds: int,
+                    upgrade: bool = False, force: bool = False) -> Dict[str, Any]:
         """
         处理单个番号的提交。
 
         :param code: 归一化番号
         :param wait_seconds: 同步等待秒数
+        :param upgrade: 是否请求洗版
         :return: 处理结果
         """
+        name = safe_name(code)
+        existing = self._find_library_item(code)
+        upgrade_requested = bool(self._enable_upgrade and (upgrade or force))
+        if existing is not None and not upgrade_requested:
+            record = self._tasks.get(code) or self._new_record(code, name)
+            record["name"] = name
+            return self._skip_record(record, "Emby 库已有该番号，未启用洗版，跳过下载")
+
         detail = self.preview(code)
         if not detail.get("chosen") and not detail.get("candidates"):
             raise JavBusError(f"{code} 没有可用磁力")
         if not self._download_dir:
             raise Cd2Error("未配置云下载目录，请先在插件设置中填写")
-        candidates = self._prepare_candidates(detail)
+        # 洗版要先在全部过滤结果里挑最好的，再截断到重试上限
+        candidates = self._prepare_candidates(detail, limit=20)
         if not candidates:
             raise JavBusError(f"{code} 没有可提交的候选磁力")
         name = safe_name(detail.get("code") or code)
         record = self._tasks.get(code) or self._new_record(code, name)
+        if existing is not None:
+            qualities = [
+                estimate_candidate_quality(
+                    candidate.get("name") or "",
+                    int(candidate.get("size_bytes") or 0),
+                )
+                for candidate in candidates
+            ]
+            best_index = max(
+                range(len(candidates)),
+                key=lambda index: (
+                    int(qualities[index].get("height") or 0),
+                    int(qualities[index].get("size") or 0),
+                    bool(qualities[index].get("has_chinese_sub")),
+                ),
+            )
+            if not force and not candidate_may_be_better(
+                existing.quality, qualities[best_index]
+            ):
+                record.update({
+                    "name": name,
+                    "existing": {
+                        "server": existing.server,
+                        "item_id": existing.item_id,
+                        "path": existing.path,
+                        "quality": existing.quality,
+                        "relative_dir": existing.relative_dir,
+                        "cd2_dir": existing.cd2_dir,
+                    },
+                })
+                return self._skip_record(
+                    record,
+                    "库内已有版本质量不低于当前候选，跳过洗版",
+                )
+            # 洗版优先尝试质量最高的候选，再按原顺序重试其它候选
+            if best_index:
+                candidates = [candidates[best_index]] + [
+                    candidate for index, candidate in enumerate(candidates)
+                    if index != best_index
+                ]
+        candidates = candidates[:self._max_candidates]
         record.update(
             {
                 "name": name,
@@ -528,6 +780,18 @@ class JavCloudDownload(_PluginBase):
                 "remove_attempts": 0,
                 "notified_finish": False,
                 "notified_failure": False,
+                "existing": (
+                    {
+                        "server": existing.server,
+                        "item_id": existing.item_id,
+                        "path": existing.path,
+                        "quality": existing.quality,
+                        "relative_dir": existing.relative_dir,
+                        "cd2_dir": existing.cd2_dir,
+                    }
+                    if existing is not None
+                    else None
+                ),
             }
         )
         self._stamp(record)
@@ -538,20 +802,25 @@ class JavCloudDownload(_PluginBase):
         try:
             existing_dir = f"{self._download_dir.rstrip('/')}/{name}"
             if client.find(existing_dir) is not None and dir_has_video(client, existing_dir):
+                # 已落盘的成片仍要走整理/移动，重复提交才能把文件送进库目录
                 record.update(
                     {
-                        "state": STATE_ORGANIZED,
+                        "state": STATE_FINISHED,
                         "final_dir": existing_dir,
-                        "message": "云下载目录已存在同名成片，跳过提交",
+                        "message": "云下载目录已存在同名成片，开始整理",
                     }
                 )
                 self._stamp(record)
+                self._organize(client, record, 0)
                 return {
                     "code": code,
                     "ok": True,
-                    "skipped": True,
+                    "skipped": record.get("state") == STATE_ORGANIZED,
+                    "moved": record.get("state") == STATE_MOVED,
                     "name": name,
-                    "reason": record["message"],
+                    "state": record.get("state"),
+                    "final_dir": record.get("final_dir"),
+                    "reason": record.get("message"),
                 }
             quota = client.quota(self._download_dir)
             record["quota"] = quota
@@ -716,9 +985,7 @@ class JavCloudDownload(_PluginBase):
     def _switch_candidate(self, client: Cd2Client, record: Dict[str, Any],
                           reason: str, result: str = "timeout") -> None:
         """
-        删除当前候选已下载的文件，然后提交下一条候选。
-
-        按产品要求只清理文件，不删除 115 离线任务记录。
+        删除当前候选已下载的文件和离线任务记录，然后提交下一条候选。
 
         :param client: CD2 客户端
         :param record: 任务记录
@@ -766,6 +1033,15 @@ class JavCloudDownload(_PluginBase):
                     self._stamp(record)
                 return
 
+        old_hash = (record.get("info_hash") or "").lower()
+        if old_hash:
+            try:
+                client.remove_offline(folder, [old_hash], delete_files=False)
+                logger.info(f"番号云下载已清理离线任务记录：{old_hash}")
+            except Exception as error:
+                logger.warning(
+                    f"番号云下载清理离线任务记录失败：{type(error).__name__}: {error}"
+                )
         record["remove_attempts"] = 0
         self._record_attempt(record, result, reason)
         candidates = record.get("candidates") or []
@@ -807,7 +1083,7 @@ class JavCloudDownload(_PluginBase):
             if self._elapsed_minutes(record.get("submitted_at")) >= self._candidate_queue_timeout_minutes:
                 self._switch_candidate(
                     client, record,
-                    f"任务启动超过 {self._candidate_queue_timeout_minutes} 分钟",
+                    f"115 排队超过 {self._candidate_queue_timeout_minutes} 分钟",
                 )
             else:
                 record.update({"state": STATE_SUBMITTED,
@@ -857,11 +1133,11 @@ class JavCloudDownload(_PluginBase):
             self._stamp(record)
             return
 
-        # OFFLINE_INIT / OFFLINE_UNKNOWN：仍在排队，按启动超时处理
+        # OFFLINE_INIT / OFFLINE_UNKNOWN：仍在排队，按 115 排队超时处理
         if self._elapsed_minutes(record.get("submitted_at")) >= self._candidate_queue_timeout_minutes:
             self._switch_candidate(
                 client, record,
-                f"任务启动超过 {self._candidate_queue_timeout_minutes} 分钟（{state}）",
+                f"115 排队超过 {self._candidate_queue_timeout_minutes} 分钟（{state}）",
             )
         else:
             record.update({"state": STATE_SUBMITTED,
@@ -884,7 +1160,7 @@ class JavCloudDownload(_PluginBase):
             "message": f"{message}（已重试 {attempts} 次）",
         })
         self._stamp(record)
-        self._notify_failure(record, record["message"])
+        self._notify_organize_failure(record, record["message"])
         return True
 
     def _organize(self, client: Cd2Client, record: Dict[str, Any],
@@ -904,6 +1180,12 @@ class JavCloudDownload(_PluginBase):
             client, folder, name, record.get("task_name", "")
         )
         if target is None:
+            # 115 刚完成时 CD2 目录缓存可能还没刷新，强制重查一次
+            target = locate_download_dir(
+                client, folder, name, record.get("task_name", ""),
+                force_refresh=True,
+            )
+        if target is None:
             message = "未找到落盘目录"
             if self._organize_give_up(record, message):
                 return
@@ -917,6 +1199,15 @@ class JavCloudDownload(_PluginBase):
             enable_filter_rules=self._enable_filter_rules,
             min_video_size=self._min_video_size_bytes,
         )
+        if tidied.get("ok"):
+            try:
+                removed_dirs = remove_empty_dirs(
+                    client, tidied.get("final_dir") or target
+                )
+                if removed_dirs:
+                    tidied["deleted_dirs"] = removed_dirs
+            except Exception as error:
+                logger.warning(f"清理空目录失败：{error}")
         record["tidy"] = tidied
         if not tidied.get("ok"):
             message = f"整理失败：{tidied.get('reason')}"
@@ -927,6 +1218,69 @@ class JavCloudDownload(_PluginBase):
             return
 
         final_dir = tidied["final_dir"]
+        actual = probe_media(client, tidied.get("final_file") or "")
+        if actual:
+            label = resolution_label(actual.get("height") or 0)
+            files = tidied.get("final_files") or []
+            if label and len(files) == 1:
+                old_path = files[0]
+                candidates = record.get("candidates") or []
+                index = int(record.get("candidate_index") or 0)
+                candidate_name = ""
+                if 0 <= index < len(candidates):
+                    candidate_name = candidates[index].get("name") or ""
+                if not candidate_name:
+                    candidate_name = record.get("task_name") or ""
+                keep_c = has_chinese_sub(candidate_name)
+                new_name = (
+                    f"{name}{'-C' if keep_c else ''} {label}"
+                    f"{PurePosixPath(old_path).suffix}"
+                )
+                if PurePosixPath(old_path).name != new_name:
+                    try:
+                        if client.rename(old_path, new_name):
+                            new_path = f"{PurePosixPath(old_path).parent}/{new_name}"
+                            tidied["final_file"] = new_path
+                            tidied["final_files"] = [new_path]
+                    except Cd2Error as error:
+                        logger.warning(f"按分辨率改名失败：{error}")
+        existing = record.get("existing") or None
+        if existing:
+            if not actual:
+                record.update({
+                    "state": STATE_ORGANIZED,
+                    "final_dir": final_dir,
+                    "final_files": tidied.get("final_files") or [],
+                    "final_file": tidied.get("final_file"),
+                    "message": "库内质量未知，无法确认洗版效果，保留在云下载目录",
+                })
+                self._stamp(record)
+                return
+            record["actual_quality"] = actual
+            if not actual_is_better(existing.get("quality") or {}, actual):
+                try:
+                    deleted = client.delete(final_dir)
+                except Exception as error:
+                    deleted = False
+                    logger.warning(f"洗版复核失败后删除下载文件出错：{error}")
+                if not deleted or client.find(final_dir) is not None:
+                    if self._organize_give_up(record, "洗版复核未通过，但删除下载文件失败"):
+                        return
+                    record.update({
+                        "state": STATE_FINISHED,
+                        "message": "洗版复核未通过，但删除下载文件失败，稍后重试",
+                    })
+                    self._stamp(record)
+                    return
+                record.update({
+                    "state": STATE_SKIPPED,
+                    "final_dir": "",
+                    "final_files": [],
+                    "final_file": "",
+                    "message": "下载后真实分辨率不高于库内版本，已删除下载文件",
+                })
+                self._stamp(record)
+                return
         record.update(
             {
                 "state": STATE_ORGANIZED,
@@ -947,11 +1301,37 @@ class JavCloudDownload(_PluginBase):
             record["message"] = "已整理；未配置库目录，无法移动"
             self._stamp(record)
             return
-        moved = move_dir(client, final_dir, library)
+        if existing and not self._replace_existing:
+            record["message"] = "库内已有版本，替换开关关闭，保留在云下载目录"
+            self._stamp(record)
+            return
+        dest_dir = ""
+        if existing and self._replace_existing:
+            # 优先用用户配置的目录映射定位旧目录，避免库结构不统一
+            dest_dir = existing.get("cd2_dir") or ""
+            if not dest_dir:
+                relative = existing.get("relative_dir") or ""
+                if relative:
+                    dest_dir = f"{library.rstrip('/')}/{relative}"
+        if existing and dest_dir:
+            old_name = str(
+                (existing.get("quality") or {}).get("path") or ""
+            ).rstrip("/").rsplit("/", 1)[-1]
+            moved = replace_existing_files(
+                client, final_dir, dest_dir,
+                tidied.get("final_files") or [],
+                old_name=old_name, code=name,
+            )
+        else:
+            moved = move_dir(
+                client, final_dir, library,
+                replace=bool(existing) and self._replace_existing,
+                dest_dir=dest_dir,
+            )
         record["move"] = moved
         if moved.get("ok"):
             moved_dir = moved.get("final_dir") or ""
-            moved_files = [
+            moved_files = moved.get("final_files") or [
                 f"{moved_dir}/{PurePosixPath(item).name}"
                 for item in (record.get("final_files") or [])
             ]
@@ -960,6 +1340,11 @@ class JavCloudDownload(_PluginBase):
                            "final_files": moved_files,
                            "final_file": moved_files[0] if moved_files else "",
                            "message": "已移动到库目录"})
+            if existing and existing.get("item_id"):
+                refreshed = EmbyLibrary(self._emby_library).refresh_item(
+                    existing.get("server") or "", existing.get("item_id") or ""
+                )
+                record["emby_refreshed"] = refreshed
         else:
             message = f"整理完成但移动失败：{moved.get('reason')}"
             if self._organize_give_up(record, message):
@@ -977,7 +1362,7 @@ class JavCloudDownload(_PluginBase):
         """
         if not self._enabled:
             return "插件未启用"
-        if not self._poll_lock.acquire(blocking=False):
+        if not _ADVANCE_LOCK.acquire(blocking=False):
             return "上一轮任务推进尚未结束"
         try:
             with self._lock:
@@ -1030,7 +1415,7 @@ class JavCloudDownload(_PluginBase):
             logger.info(f"番号云下载 {summary}")
             return summary
         finally:
-            self._poll_lock.release()
+            _ADVANCE_LOCK.release()
 
     # ---------- 扩展点 ----------
 
@@ -1086,6 +1471,30 @@ class JavCloudDownload(_PluginBase):
                 "description": "返回当前数据源、JavRanking 缓存统计与可用能力",
             },
             {
+                "path": "/libraries",
+                "endpoint": self.api_libraries,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "Emby 媒体库列表",
+                "description": "列出已启用的 Emby 媒体库，用于选择成人影片库",
+            },
+            {
+                "path": "/library_lookup",
+                "endpoint": self.api_library_lookup,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "Emby 番号查询",
+                "description": "按番号查询 Emby 成人库条目与真实质量",
+            },
+            {
+                "path": "/library_items",
+                "endpoint": self.api_library_items,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "Emby 库条目样本",
+                "description": "列出配置的 Emby 成人库前若干条，用于确认库名和路径",
+            },
+            {
                 "path": "/ranking",
                 "endpoint": self.api_ranking,
                 "methods": ["GET"],
@@ -1131,7 +1540,11 @@ class JavCloudDownload(_PluginBase):
         if not codes:
             return {"ok": False, "reason": "缺少 codes 参数"}
         wait_seconds = int(payload.get("wait_seconds") or 0)
-        return self.submit(codes, wait_seconds=wait_seconds)
+        upgrade = bool(payload.get("upgrade"))
+        force = bool(payload.get("force"))
+        return self.submit(
+            codes, wait_seconds=wait_seconds, upgrade=upgrade, force=force
+        )
 
     def api_tasks(self) -> Dict[str, Any]:
         """返回任务记录。"""
@@ -1176,6 +1589,10 @@ class JavCloudDownload(_PluginBase):
             "ok": True,
             "data": {
                 "mode": self._source_mode,
+                "sites": {
+                    "javbus": self._use_javbus,
+                    "javranking": self._use_javranking,
+                },
                 "sources": [
                     {
                         "name": "javbus",
@@ -1185,12 +1602,47 @@ class JavCloudDownload(_PluginBase):
                     {
                         "name": "javranking",
                         "available": bool(stats.get("available")),
-                        "capabilities": ["metadata", "rankings", "magnets_if_cached"],
+                        "capabilities": ["metadata", "rankings", "magnets"],
                         "stats": stats,
                     },
                 ],
             },
         }
+
+    def api_libraries(self) -> Dict[str, Any]:
+        """返回 Emby 媒体库列表。"""
+        try:
+            items = EmbyLibrary().list_libraries()
+            return {"ok": True, "total": len(items), "items": items}
+        except Exception as error:
+            return {"ok": False, "reason": f"{type(error).__name__}: {error}"}
+
+    def api_library_lookup(self, code: str = "") -> Dict[str, Any]:
+        """查询 Emby 成人库内的番号与质量。"""
+        if not code:
+            return {"ok": False, "reason": "缺少 code 参数"}
+        hit = self._find_library_item(normalize_code(code))
+        if hit is None:
+            return {"ok": False, "reason": "Emby 成人库未找到该番号"}
+        return {
+            "ok": True,
+            "data": {
+                "server": hit.server,
+                "item_id": hit.item_id,
+                "path": hit.path,
+                "quality": hit.quality,
+                "relative_dir": hit.relative_dir,
+                "cd2_dir": hit.cd2_dir,
+            },
+        }
+
+    def api_library_items(self, limit: int = 20) -> Dict[str, Any]:
+        """列出 Emby 成人库条目样本。"""
+        try:
+            items = EmbyLibrary(self._emby_library).list_items(max(1, min(int(limit), 200)))
+            return {"ok": True, "total": len(items), "items": items}
+        except Exception as error:
+            return {"ok": False, "reason": f"{type(error).__name__}: {error}"}
 
     def api_ranking(self, list_name: str = "main", limit: int = 50) -> Dict[str, Any]:
         """读取 JavRanking 本地榜单。"""
@@ -1216,8 +1668,37 @@ class JavCloudDownload(_PluginBase):
         """立即推进一次任务。"""
         return {"ok": True, "summary": self.advance_tasks(0)}
 
+    def _emby_library_options(self) -> List[dict]:
+        """读取 Emby 媒体库列表，供设置页下拉选择。"""
+        if self._emby_options and time.time() - self._emby_options_at < 300:
+            return self._emby_options
+        options: List[dict] = []
+        try:
+            for item in EmbyLibrary().list_libraries():
+                name = str(item.get("name") or "").strip()
+                if not name or any(option["value"] == name for option in options):
+                    continue
+                server = str(item.get("server") or "").strip()
+                options.append({
+                    "title": f"{name}（{server}）" if server else name,
+                    "value": name,
+                })
+        except Exception as error:
+            logger.warning(f"读取 Emby 媒体库列表失败：{type(error).__name__}: {error}")
+        if self._emby_library and not any(
+            option["value"] == self._emby_library for option in options
+        ):
+            options.append({
+                "title": self._emby_library,
+                "value": self._emby_library,
+            })
+        self._emby_options = options
+        self._emby_options_at = time.time()
+        return options
+
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """返回插件配置表单与默认值。"""
+        library_options = self._emby_library_options()
         return [
             {
                 "component": "VForm",
@@ -1270,25 +1751,35 @@ class JavCloudDownload(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 5},
+                                "props": {"cols": 12, "md": 3},
                                 "content": [
                                     {
-                                        "component": "VSelect",
+                                        "component": "VCheckbox",
                                         "props": {
-                                            "model": "source_mode",
-                                            "label": "数据源",
-                                            "items": [
-                                                {"title": "JavBus（直连）", "value": "javbus"},
-                                                {"title": "JavRanking（本地缓存）", "value": "javranking"},
-                                                {"title": "自动（JavRanking 优先，缺失回退 JavBus）", "value": "auto"},
-                                            ],
+                                            "model": "use_javbus",
+                                            "label": "JavBus",
+                                            "hide-details": True,
                                         },
                                     }
                                 ],
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 7},
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VCheckbox",
+                                        "props": {
+                                            "model": "use_javranking",
+                                            "label": "JavRanking（按需抓取磁力）",
+                                            "hide-details": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -1464,6 +1955,74 @@ class JavCloudDownload(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "emby_library",
+                                            "label": "Emby 成人影片库",
+                                            "items": library_options,
+                                            "clearable": True,
+                                            "hint": "从已配置的 Emby 媒体服务器读取；留空搜索全部电影/视频库",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "enable_upgrade",
+                                            "label": "启用洗版",
+                                            "hint": "开启后，请求洗版时才比较画质并替换",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3, "v-show": "enable_upgrade"},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "replace_existing",
+                                            "label": "洗版通过后替换旧目录",
+                                            "hint": "默认开启；替换前会删除库内同名旧目录",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "v-show": "enable_upgrade"},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "library_map",
+                                            "label": "Emby 目录映射（洗版替换用）",
+                                            "placeholder": "/mnt/strm/adult:/cd2/adult",
+                                            "hint": "每行一条，格式：Emby 路径:CD2 路径；用于定位旧片所在目录并删除",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [
                                     {
@@ -1507,7 +2066,9 @@ class JavCloudDownload(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "candidate_timeout_minutes",
-                                            "label": "单条候选超时（分钟）",
+                                            "label": "下载超时（分钟）",
+                                            "hint": "进入下载后超过该时间仍未完成，换下一个候选",
+                                            "persistent-hint": True,
                                             "type": "number",
                                             "hint": "进入下载后计时，默认 5",
                                             "persistent-hint": True,
@@ -1523,7 +2084,9 @@ class JavCloudDownload(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "candidate_queue_timeout_minutes",
-                                            "label": "任务启动超时（分钟）",
+                                            "label": "115 排队超时（分钟）",
+                                            "hint": "提交后超过该时间仍未开始下载，换下一个候选",
+                                            "persistent-hint": True,
                                             "type": "number",
                                             "hint": "从提交算起，默认 10",
                                             "persistent-hint": True,
@@ -1580,8 +2143,13 @@ class JavCloudDownload(_PluginBase):
             }
         ], {
             "enabled": False,
-            "source_mode": "javbus",
+            "use_javbus": True,
+            "use_javranking": False,
             "javranking_dir": "",
+            "emby_library": "",
+            "library_map": "",
+            "enable_upgrade": False,
+            "replace_existing": True,
             "enable_filter_rules": True,
             "min_video_size_mb": 300,
             "source_base": "https://www.javbus.com",

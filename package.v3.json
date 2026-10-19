@@ -1,13 +1,18 @@
 {
   "JavCloudDownload": {
     "name": "番号云下载",
-    "description": "按番号从 JavBus 取种，经 CloudDrive2 提交 115 离线下载，完成后清理、改名并可移动到库目录。",
-    "version": "0.1.7",
+    "description": "按番号从 JavBus / JavRanking 取种，经 CloudDrive2 提交 115 离线下载；完成后清理、按番号+分辨率改名、可选洗版并移动到 Emby 库目录。",
+    "version": "0.6.8",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "CRY1221",
     "level": 1,
     "system_version": ">=3.1.8",
     "history": {
+      "v0.6.8": "修复整理后残留空目录；落盘失败前强制刷新 CD2 目录；通知区分下载完成与整理失败；超时换种自动清理 115 离线任务记录。",
+      "v0.6.0": "种子来源改为勾选框，支持 JavBus 与 JavRanking 并行；JavRanking 按需抓取磁力并缓存；全站请求最小间隔 3 秒。",
+      "v0.5.0": "新增可选洗版：Emby 库基线、目录映射、真实分辨率与码率复核、文件级替换；Emby 库改为下拉选择。",
+      "v0.4.0": "识别 4K/6K/8K 码率标签；视频按番号、-C 标记与真实分辨率重命名；码率参与洗版判断。",
+      "v0.2.0": "10 秒轮询、5 分钟下载超时换种、完成通知；超时清理已下载文件。",
       "v0.1.2": "初始版本：JavBus 取种、CloudDrive2 离线下载、完成后清理改名与可选移动。",
       "v0.1.3": "P0 修复：重载不再清空任务记录；整理模式区分主视频与全部视频；接入下载超时与整理重试上限；JavBus 详情页单次请求；单条失败不再中断整批。",
       "v0.1.4": "新增数据源选择：JavBus 直连 / JavRanking 本地缓存 / 自动回退；新增 /sources、/ranking、/lookup API。",

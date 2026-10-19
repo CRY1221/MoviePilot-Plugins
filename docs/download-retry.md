@@ -27,8 +27,8 @@
 | 配置 | 默认 | 说明 |
 |---|---:|---|
 | `poll_seconds` | 10 | 轮询间隔（秒） |
-| `candidate_timeout_minutes` | 5 | 进入下载后的单条候选超时 |
-| `candidate_queue_timeout_minutes` | 10 | 从提交到进入下载的启动超时 |
+| `candidate_timeout_minutes` | 5 | 下载超时：进入下载后超过该时间未完成 |
+| `candidate_queue_timeout_minutes` | 30 | 115 排队超时：提交后超过该时间仍未开始下载 |
 | `max_candidates` | 3 | 一个番号最多尝试候选数 |
 
 ## 超时清理与换种
@@ -51,7 +51,7 @@ FindFileByPath / DeleteFile（云下载目录下的任务目录）
 
 - 任务进入 `OFFLINE_FINISHED`：发一条 `番号云下载完成` MP 通知。
 - 所有候选失败、删除重试耗尽、整理重试耗尽：发一条 `番号云下载失败` 通知。
-- 单条候选超时换种只写日志和任务记录，不逐条发通知。
+- 下载超时换种只写日志和任务记录，不逐条发通知。
 
 ## 旧任务兼容
 

@@ -391,10 +391,39 @@ class Cd2Client:
             "RemoveOfflineFiles",
             "RemoveOfflineFiles",
             pb.RemoveOfflineFilesRequest(
-                infoHashes=list(info_hashes), deleteFiles=delete_files, path=folder
+                infoHashes=[str(item).lower() for item in info_hashes],
+                deleteFiles=delete_files,
+                path=folder,
             ),
         )
         return bool(getattr(result, "success", False))
+
+    def download_url(self, path: str) -> str:
+        """
+        获取文件的 CD2 直链，供 ffprobe 读取媒体信息。
+
+        返回的 URL 含访问令牌，禁止写入日志。
+
+        :param path: 云盘内文件路径
+        :return: 可直接访问的 URL
+        """
+        result = self._call(
+            "GetDownloadUrlPath",
+            "GetDownloadUrlPath",
+            pb.GetDownloadUrlPathRequest(
+                path=path,
+                preview=False,
+                lazy_read=True,
+                get_direct_url=True,
+            ),
+        )
+        url = (getattr(result, "directUrl", "") or getattr(result, "downloadUrlPath", "") or "").strip()
+        if not url:
+            raise Cd2Error("CD2 未返回下载直链")
+        url = url.replace("{SCHEME}", "http").replace("{HOST}", self._address)
+        if url.startswith("/"):
+            url = f"http://{self._address}{url}"
+        return url
 
 
 def probe(host: str, port: int, token: str, folder: str) -> Dict[str, Any]:

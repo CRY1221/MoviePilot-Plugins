@@ -24,8 +24,8 @@ from typing import Any, Dict, List, Optional
 # 第一会所标志
 SIS001_PATTERNS = ("第一會所新片", "第一会所新片", "SIS001", "sis001")
 
-# 4K 标志
-UHD_PATTERN = re.compile(r"(?:^|[\s._\-\[@])(?:4K|UHD|2160P|2160I)(?:$|[\s._\-\]@])", re.I)
+# 真 4K 标志；JAV 发布名里的 4K/6K/8K 多为码率标签，不能当分辨率
+UHD_PATTERN = re.compile(r"(?:^|[\s._\-\[@])(?:UHD|2160P|2160I)(?:$|[\s._\-\]@])", re.I)
 
 # 低于该体积的 4K 视为假 4K
 UHD_MIN_SIZE = 5 * 1024 ** 3

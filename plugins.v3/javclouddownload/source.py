@@ -13,13 +13,14 @@ JavBus 种子源。
 from __future__ import annotations
 
 import re
-import threading
 import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote, unquote, urljoin
 
 from app.sdk.logging import logger
 from app.sdk.network import RequestUtils
+
+from .throttle import MIN_INTERVAL, wait as throttle_wait
 
 DEFAULT_BASE = "https://www.javbus.com"
 USER_AGENT = (
@@ -35,14 +36,9 @@ CODE_PATTERN = re.compile(
 SIZE_PATTERN = re.compile(r"^[\d.]+\s*(GB|GiB|MB|MiB|TB)$", re.IGNORECASE)
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-# 限速：单线程最小间隔，保守低于实测阈值
-MIN_INTERVAL = 0.6
+# 限速：与 JavRanking 共用 3 秒全局间隔，避免触发站点限流
 RETRY_ON_429 = 3
 COOLDOWN_429 = 15
-
-_lock = threading.Lock()
-_last_request_at = 0.0
-
 
 class JavBusError(RuntimeError):
     """JavBus 抓取失败。"""
@@ -136,12 +132,7 @@ class JavBusSource:
 
     def _throttle(self) -> None:
         """执行全局最小间隔限速。"""
-        global _last_request_at
-        with _lock:
-            wait = self._min_interval - (time.time() - _last_request_at)
-            if wait > 0:
-                time.sleep(wait)
-            _last_request_at = time.time()
+        throttle_wait("javbus", self._min_interval)
 
     def _get(self, path: str, referer: Optional[str] = None) -> str:
         """
