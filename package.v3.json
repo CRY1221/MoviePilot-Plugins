@@ -2,13 +2,14 @@
   "JavCloudDownload": {
     "name": "番号云下载",
     "description": "按番号从 JavBus 取种，经 CloudDrive2 提交 115 离线下载，完成后清理、改名并可移动到库目录。",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "CRY1221",
     "level": 1,
     "system_version": ">=3.1.8",
     "history": {
-      "v0.1.2": "初始版本：JavBus 取种、CloudDrive2 离线下载、完成后清理改名与可选移动。"
+      "v0.1.2": "初始版本：JavBus 取种、CloudDrive2 离线下载、完成后清理改名与可选移动。",
+      "v0.1.3": "P0 修复：重载不再清空任务记录；整理模式区分主视频与全部视频；接入下载超时与整理重试上限；JavBus 详情页单次请求；单条失败不再中断整批。"
     }
   }
 }

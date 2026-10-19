@@ -34,6 +34,9 @@ from .source import JavBusSource, JavBusError, info_hash_of, normalize_code
 
 MAX_RECORDS = 200
 
+# 整理阶段连续失败多少次后停止重试
+MAX_ORGANIZE_ATTEMPTS = 5
+
 
 class JavCloudDownload(_PluginBase):
     """番号云下载插件主类。"""
@@ -41,7 +44,7 @@ class JavCloudDownload(_PluginBase):
     plugin_name = "番号云下载"
     plugin_desc = "按番号从 JavBus 取种，经 CloudDrive2 云下载到 115，完成后清理、改名并可移动到库目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.1.2"
+    plugin_version = "0.1.3"
     plugin_label = "工具"
     plugin_author = "CRY1221"
     plugin_config_prefix = "javclouddownload_"
@@ -77,7 +80,8 @@ class JavCloudDownload(_PluginBase):
 
         :param config: 插件配置
         """
-        self.stop_service()
+        # 生命周期会在替换旧实例时调用 stop_service；这里不能先落盘，
+        # 否则新实例的空 _tasks 会覆盖已保存的任务记录。
         config = config or {}
         self._enabled = bool(config.get("enabled"))
         self._source_base = (config.get("source_base") or "https://www.javbus.com").strip()
@@ -167,6 +171,7 @@ class JavCloudDownload(_PluginBase):
             "created_at": now,
             "updated_at": now,
             "attempts": 0,
+            "organize_attempts": 0,
             "message": "",
         }
 
@@ -221,8 +226,10 @@ class JavCloudDownload(_PluginBase):
                 continue
             try:
                 results.append(self._submit_one(normalized, wait_seconds))
-            except (JavBusError, Cd2Error) as error:
-                logger.error(f"番号云下载提交失败 {normalized}：{error}")
+            except Exception as error:
+                logger.error(
+                    f"番号云下载提交失败 {normalized}：{type(error).__name__}: {error}"
+                )
                 record = self._tasks.get(normalized) or self._new_record(normalized, normalized)
                 record.update({"state": STATE_FAILED, "message": str(error)})
                 self._stamp(record)
@@ -286,7 +293,13 @@ class JavCloudDownload(_PluginBase):
                 self._stamp(record)
                 return {"code": code, "ok": False, "reason": record["message"]}
             submission = client.add_offline(chosen["magnet"], self._download_dir)
-            record.update({"state": STATE_SUBMITTED, "message": f"已提交（{submission}）"})
+            record.update({
+                "state": STATE_SUBMITTED,
+                "message": f"已提交（{submission}）",
+                "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "attempts": 0,
+                "organize_attempts": 0,
+            })
             self._stamp(record)
             if wait_seconds > 0:
                 self._advance_record(client, record, wait_seconds)
@@ -301,6 +314,26 @@ class JavCloudDownload(_PluginBase):
             "state": record.get("state"),
         }
 
+    def _wait_exceeded(self, record: Dict[str, Any]) -> bool:
+        """
+        判断下载阶段是否已超过最长等待时间。
+
+        :param record: 任务记录
+        :return: 超时返回 True
+        """
+        if record.get("state") not in (STATE_SUBMITTED, STATE_DOWNLOADING):
+            return False
+        if self._max_wait_minutes <= 0:
+            return False
+        try:
+            submitted_at = datetime.strptime(
+                record["submitted_at"], "%Y-%m-%d %H:%M:%S"
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        elapsed_minutes = (datetime.now() - submitted_at).total_seconds() / 60
+        return elapsed_minutes > self._max_wait_minutes
+
     def _advance_record(self, client: Cd2Client, record: Dict[str, Any],
                         wait_seconds: int = 0) -> None:
         """
@@ -314,6 +347,7 @@ class JavCloudDownload(_PluginBase):
         name = record.get("name") or code
         info_hash = record.get("info_hash") or ""
         folder = record.get("folder") or self._download_dir
+        record["attempts"] = int(record.get("attempts") or 0) + 1
         if not record.get("submitted_at"):
             record["submitted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -325,6 +359,13 @@ class JavCloudDownload(_PluginBase):
             return
 
         if task is None:
+            if self._wait_exceeded(record):
+                record.update({
+                    "state": STATE_FAILED,
+                    "message": f"下载等待超过 {self._max_wait_minutes} 分钟，未查询到离线任务",
+                })
+                self._stamp(record)
+                return
             record["message"] = "尚未查询到离线任务"
             self._stamp(record)
             return
@@ -338,6 +379,14 @@ class JavCloudDownload(_PluginBase):
             self._stamp(record)
             return
         if state != "OFFLINE_FINISHED":
+            if self._wait_exceeded(record):
+                record.update({
+                    "state": STATE_FAILED,
+                    "message": f"下载等待超过 {self._max_wait_minutes} 分钟"
+                               f"（最后状态 {state} {record['percent']}%）",
+                })
+                self._stamp(record)
+                return
             record.update({"state": STATE_DOWNLOADING,
                            "message": f"下载中 {record['percent']}%"})
             self._stamp(record)
@@ -347,6 +396,24 @@ class JavCloudDownload(_PluginBase):
         record["message"] = "下载完成，开始整理"
         self._stamp(record)
         self._organize(client, record, wait_seconds)
+
+    def _organize_give_up(self, record: Dict[str, Any], message: str) -> bool:
+        """
+        整理连续失败超过上限时终止重试。
+
+        :param record: 任务记录
+        :param message: 本次失败原因
+        :return: True 表示已终止，调用方应立即返回
+        """
+        attempts = int(record.get("organize_attempts") or 0)
+        if attempts <= MAX_ORGANIZE_ATTEMPTS:
+            return False
+        record.update({
+            "state": STATE_FAILED,
+            "message": f"{message}（已重试 {attempts} 次）",
+        })
+        self._stamp(record)
+        return True
 
     def _organize(self, client: Cd2Client, record: Dict[str, Any],
                   wait_seconds: int = 0) -> None:
@@ -359,19 +426,26 @@ class JavCloudDownload(_PluginBase):
         """
         name = record.get("name") or record.get("code")
         folder = record.get("folder") or self._download_dir
+        record["organize_attempts"] = int(record.get("organize_attempts") or 0) + 1
+
         target = locate_download_dir(
             client, folder, name, record.get("task_name", "")
         )
         if target is None:
-            record.update({"state": STATE_FINISHED, "message": "未找到落盘目录，稍后重试"})
+            message = "未找到落盘目录"
+            if self._organize_give_up(record, message):
+                return
+            record.update({"state": STATE_FINISHED, "message": f"{message}，稍后重试"})
             self._stamp(record)
             return
 
         tidied = tidy_dir(client, target, name, delete_junk_only=self._delete_junk_only)
         record["tidy"] = tidied
         if not tidied.get("ok"):
-            record.update({"state": STATE_FINISHED,
-                           "message": f"整理失败：{tidied.get('reason')}"})
+            message = f"整理失败：{tidied.get('reason')}"
+            if self._organize_give_up(record, message):
+                return
+            record.update({"state": STATE_FINISHED, "message": message})
             self._stamp(record)
             return
 
@@ -403,7 +477,11 @@ class JavCloudDownload(_PluginBase):
                            "final_file": f"{moved.get('final_dir')}/{name}{tidied.get('ext', '')}",
                            "message": "已移动到库目录"})
         else:
-            record["message"] = f"整理完成但移动失败：{moved.get('reason')}"
+            message = f"整理完成但移动失败：{moved.get('reason')}"
+            if self._organize_give_up(record, message):
+                return
+            # 保持在可推进状态，下一次轮询重试整理与移动。
+            record.update({"state": STATE_FINISHED, "message": message})
         self._stamp(record)
 
     def advance_tasks(self, minutes: int = 0) -> str:
@@ -429,8 +507,8 @@ class JavCloudDownload(_PluginBase):
                         done += 1
                     elif record.get("state") == STATE_FAILED:
                         failed += 1
-                except (Cd2Error, JavBusError) as error:
-                    record["message"] = str(error)
+                except Exception as error:
+                    record["message"] = f"{type(error).__name__}: {error}"
                     self._stamp(record)
                     failed += 1
         finally:
@@ -594,7 +672,9 @@ class JavCloudDownload(_PluginBase):
                                         "component": "VSwitch",
                                         "props": {
                                             "model": "delete_junk_only",
-                                            "label": "仅删除非视频文件",
+                                            "label": "只保留主视频",
+                                            "hint": "开启时只保留体积最大的视频和字幕，删除推广小视频；关闭时保留全部视频，只删非视频文件",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],
