@@ -195,6 +195,62 @@ check("保留全部视频模式：不删 sample", "/dl/old/sample.mp4" not in cl
 check("保留全部视频模式：仍删广告", "/dl/old/ad.txt" in client.deleted, str(client.deleted))
 check("保留全部视频模式：保留字幕", all("srt" not in path for path in client.deleted), str(client.deleted))
 
+# ---------- 多段资源（CD1/CD2、part1/part2）----------
+
+def _tidy_multipart_case(prefix: str):
+    tree = {
+        "/dl/multi": [
+            _File(f"{prefix}-CD1.mp4", 6 * GB),
+            _File(f"{prefix}-CD2.mp4", 6 * GB),
+            _File("sample.mp4", 100 * 1024 ** 2),
+            _File(f"{prefix}-CD1.chs.srt", 100 * 1024),
+        ]
+    }
+    client = _FakeClient(tree, {"/dl/multi"})
+    result = pipeline.tidy_dir(client, "/dl/multi", "ABC-123", delete_junk_only=True)
+    return client, result
+
+client, result = _tidy_multipart_case("OLD")
+check("多段：两个分段都保留", "/dl/multi/OLD-CD1.mp4" not in client.deleted and "/dl/multi/OLD-CD2.mp4" not in client.deleted, str(client.deleted))
+check("多段：推广视频仍删除", "/dl/multi/sample.mp4" in client.deleted, str(client.deleted))
+check("多段：两个分段都改名", ("/dl/multi/OLD-CD1.mp4", "ABC-123-CD1.mp4") in client.renamed and ("/dl/multi/OLD-CD2.mp4", "ABC-123-CD2.mp4") in client.renamed, str(client.renamed))
+check("多段：final_files 两条", len(result.get("final_files") or []) == 2, str(result))
+check("多段：目录改名", result.get("final_dir") == "/dl/ABC-123", str(result))
+
+tree = {
+    "/dl/part": [
+        _File("OLD-part1.mkv", 5 * GB),
+        _File("OLD-part2.mkv", 5 * GB),
+    ]
+}
+client = _FakeClient(tree, {"/dl/part"})
+result = pipeline.tidy_dir(client, "/dl/part", "XYZ-999", delete_junk_only=True)
+check("多段：part1/part2 识别", ("/dl/part/OLD-part1.mkv", "XYZ-999-PART1.mkv") in client.renamed and ("/dl/part/OLD-part2.mkv", "XYZ-999-PART2.mkv") in client.renamed, str(client.renamed))
+
+tree = {
+    "/dl/full": [
+        _File("ABC-123.mp4", 10 * GB),
+        _File("promo-CD1.mp4", 5 * 1024 ** 2),
+        _File("promo-CD2.mp4", 5 * 1024 ** 2),
+    ]
+}
+client = _FakeClient(tree, {"/dl/full"})
+result = pipeline.tidy_dir(client, "/dl/full", "ABC-123", delete_junk_only=True)
+check("多段：小体积伪分段不参与", "/dl/full/ABC-123.mp4" not in client.deleted, str(client.deleted))
+check("多段：伪分段被删除", "/dl/full/promo-CD1.mp4" in client.deleted and "/dl/full/promo-CD2.mp4" in client.deleted, str(client.deleted))
+
+tree = {
+    "/dl/full2": [
+        _File("ABC-123.mp4", 10 * GB),
+        _File("ABC-123-CD1.mp4", 6 * GB),
+        _File("ABC-123-CD2.mp4", 6 * GB),
+    ]
+}
+client = _FakeClient(tree, {"/dl/full2"})
+result = pipeline.tidy_dir(client, "/dl/full2", "ABC-123", delete_junk_only=True)
+check("多段：已有完整成片时不被分段覆盖", "/dl/full2/ABC-123.mp4" not in client.deleted, str(client.deleted))
+check("多段：完整成片场景删除分段", "/dl/full2/ABC-123-CD1.mp4" in client.deleted, str(client.deleted))
+
 
 # ---------- JavBus：直连详情页只请求一次 ----------
 
