@@ -8,6 +8,7 @@ CloudDrive2 gRPC 客户端。
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Dict, Iterable, List, Optional
 
 import grpc
@@ -30,6 +31,10 @@ DEFAULT_CHANNEL_OPTIONS = (
 
 # 115 重复提交离线任务的业务错误码
 DUPLICATE_OFFLINE_CODE = "10008"
+
+# 账号密码换来的 JWT 缓存，避免 10 秒轮询每次都重新登录
+_TOKEN_CACHE: Dict[tuple, tuple[str, float]] = {}
+_TOKEN_LOCK = threading.Lock()
 
 
 class Cd2Error(RuntimeError):
@@ -114,8 +119,24 @@ class Cd2Client:
                 self._address, options=DEFAULT_CHANNEL_OPTIONS
             )
             self._stub = pb_grpc.CloudDriveFileSrvStub(self._channel)
-            if not self._token:
-                self._login()
+            if self._username and self._password:
+                # 账号密码登录拿到的是完整用户 JWT，权限比只读 API Token 更全
+                cached = self._cached_token()
+                if cached:
+                    self._token = cached
+                else:
+                    self._login()
+            elif not self._token:
+                raise Cd2Error("未配置 API 令牌，也未配置账号密码")
+
+    def _cached_token(self) -> str:
+        """读取仍有效的账号密码 JWT。"""
+        key = (self._address, self._username)
+        with _TOKEN_LOCK:
+            item = _TOKEN_CACHE.get(key)
+        if item and item[1] > time.time() + 60:
+            return item[0]
+        return ""
 
     def close(self) -> None:
         """关闭 gRPC channel。"""
@@ -130,8 +151,8 @@ class Cd2Client:
 
     def _login(self) -> None:
         """使用账号密码换取 JWT 令牌。"""
-        if not self._username:
-            raise Cd2Error("未配置 API 令牌，也未配置账号密码")
+        if not self._username or not self._password:
+            raise Cd2Error("账号密码登录需要同时填写账号和密码")
         response = self._stub.GetToken(
             pb.GetTokenRequest(userName=self._username, password=self._password),
             timeout=self._timeout,
@@ -139,6 +160,12 @@ class Cd2Client:
         if not response.success:
             raise Cd2Error(f"CloudDrive2 认证失败：{response.errorMessage or '账号或密码错误'}")
         self._token = response.token
+        expires_at = time.time() + 1800
+        expiration = getattr(response, "expiration", None)
+        if expiration is not None and getattr(expiration, "seconds", 0):
+            expires_at = float(expiration.seconds)
+        with _TOKEN_LOCK:
+            _TOKEN_CACHE[(self._address, self._username)] = (self._token, expires_at)
 
     def _metadata(self) -> List[tuple]:
         """构造带 Bearer 令牌的调用元数据。"""
@@ -290,31 +317,34 @@ class Cd2Client:
         )
         return {"total": info.total, "used": info.used, "left": info.left}
 
-    def list_offline(self, folder: str) -> List[Any]:
+    def list_offline(self, folder: str, force_refresh: bool = False) -> List[Any]:
         """
         列出该云盘的离线任务。
 
         :param folder: 云盘内路径
+        :param force_refresh: 是否绕过 CD2 目录缓存
         :return: OfflineFile 列表
         """
         result = self._call(
             "ListOfflineFilesByPath",
             "ListOfflineFilesByPath",
-            pb.FileRequest(path=folder),
+            pb.FileRequest(path=folder, forceRefresh=force_refresh),
         )
         return list(result.offlineFiles)
 
-    def find_offline(self, folder: str, info_hash: str = "", name: str = "") -> Optional[Any]:
+    def find_offline(self, folder: str, info_hash: str = "", name: str = "",
+                     force_refresh: bool = False) -> Optional[Any]:
         """
         按 infoHash 或名称定位离线任务。
 
         :param folder: 云盘内路径
         :param info_hash: 磁力 infoHash
         :param name: 任务名称
+        :param force_refresh: 是否绕过 CD2 目录缓存
         :return: 匹配的 OfflineFile；未找到返回 None
         """
         target = (info_hash or "").lower()
-        for task in self.list_offline(folder):
+        for task in self.list_offline(folder, force_refresh=force_refresh):
             if target and (task.infoHash or "").lower() == target:
                 return task
             if name and task.name == name:
