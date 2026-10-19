@@ -12,8 +12,10 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import types
@@ -30,7 +32,7 @@ else:  # pragma: no cover - 仓库布局变化时给出明确提示
 TMP = tempfile.mkdtemp(prefix="jcd-pkg-")
 PKG = Path(TMP) / "jcd"
 PKG.mkdir()
-for name in ("__init__.py", "cd2.py", "pipeline.py", "selector.py", "source.py", "pyproject.toml"):
+for name in ("__init__.py", "cd2.py", "javranking.py", "pipeline.py", "selector.py", "source.py", "pyproject.toml"):
     shutil.copy(SRC / name, PKG / name)
 
 
@@ -46,12 +48,16 @@ class _PluginBase:
 
     def __init__(self) -> None:
         self._store = {}
+        self._data_path = Path(tempfile.mkdtemp(prefix="mp-data-"))
 
     def get_data(self, key=None, plugin_id=None):
         return self._store.get(key)
 
     def save_data(self, key, value, plugin_id=None):
         self._store[key] = value
+
+    def get_data_path(self, plugin_id=None):
+        return self._data_path
 
 
 plugins._PluginBase = _PluginBase
@@ -254,6 +260,97 @@ check("已完成任务不受 max_wait 影响", inst2._wait_exceeded(finished) is
 limited = {"code": "ABC-123", "organize_attempts": jcd.MAX_ORGANIZE_ATTEMPTS + 1}
 gave_up = inst2._organize_give_up(limited, "未找到落盘目录")
 check("整理超过上限停止重试", gave_up and limited.get("state") == "failed", str(limited))
+
+
+# ---------- JavRanking 缓存数据源 ----------
+
+CACHE = Path(tempfile.mkdtemp(prefix="jr-cache-"))
+DB = CACHE / "javranking.db"
+MAGNETS = [
+    {
+        "name": "START-257-UC.torrent.无码破解",
+        "size_text": "7.38GB", "size_bytes": 7924214661, "date": "",
+        "magnet": "magnet:?xt=urn:btih:" + "a" * 40,
+        "info_hash": "a" * 40,
+    },
+    {
+        "name": "START-257-C.torrent",
+        "size_text": "5.82GB", "size_bytes": 6249177415, "date": "",
+        "magnet": "magnet:?xt=urn:btih:" + "b" * 40,
+        "info_hash": "b" * 40,
+    },
+]
+con = sqlite3.connect(DB)
+con.executescript(
+    """
+    CREATE TABLE videos (id INTEGER PRIMARY KEY, code TEXT, title TEXT, url TEXT);
+    CREATE TABLE rankings (list TEXT, rank INTEGER, code TEXT, title TEXT,
+                           date TEXT, video_id INTEGER, url TEXT);
+    CREATE TABLE details (code TEXT PRIMARY KEY, video_id INTEGER, title TEXT,
+                          release_date TEXT, duration TEXT, url TEXT,
+                          magnets_json TEXT, fetched_at TEXT);
+    """
+)
+con.execute("insert into videos values (78, 'START-257', '测试标题', 'https://javranking.cc/zh-hans/videos/78/')")
+con.execute("insert into videos values (3127, 'ABF-394', '无详情标题', 'https://javranking.cc/zh-hans/videos/3127/')")
+con.execute("insert into rankings values ('main', 11, 'START-257', '测试标题', '2025-03-06', 78, 'https://javranking.cc/zh-hans/videos/78/')")
+con.execute(
+    "insert into details values (?, ?, ?, ?, ?, ?, ?, ?)",
+    ("START-257", 78, "测试标题", "2025-03-06", "PT144M",
+     "https://javranking.cc/zh-hans/videos/78/", json.dumps(MAGNETS, ensure_ascii=False), "2026-10-20 01:42:04"),
+)
+con.commit(); con.close()
+
+jr = jcd.JavRankingSource(str(CACHE))
+stats = jr.stats()
+check("缓存：videos 统计", stats.get("videos") == 2, str(stats))
+check("缓存：details 统计", stats.get("details") == 1, str(stats))
+detail = jr.fetch_detail("START-257")
+check("缓存：读取详情磁力", len(detail.get("magnets") or []) == 2 and detail.get("source") == "javranking", str(detail))
+check("缓存：番号查询", (jr.lookup("START-257") or {}).get("has_magnets") is True)
+check("缓存：榜单读取", len(jr.rankings("main", 10)) == 1)
+try:
+    jr.fetch_detail("NOPE-000")
+    check("缓存：未知番号报错", False)
+except jcd.JavRankingError:
+    check("缓存：未知番号报错", True)
+
+inst3 = jcd.JavCloudDownload()
+inst3._source_mode = "javranking"
+inst3._javranking_dir = str(CACHE)
+inst3._allow_uncensored = False
+inst3._allow_junk = False
+preview = inst3.preview("START-257")
+check("数据源：javranking 选种", preview.get("source") == "javranking" and preview.get("tier") == "中文字幕", str(preview))
+check("数据源：排除 UC 后选中 -C", (preview.get("chosen") or {}).get("name") == "START-257-C.torrent", str(preview.get("chosen")))
+
+try:
+    inst3.preview("ABF-394")
+    check("数据源：javranking 无磁力报错", False)
+except jcd.JavRankingError:
+    check("数据源：javranking 无磁力报错", True)
+
+inst4 = jcd.JavCloudDownload()
+inst4._source_mode = "auto"
+inst4._javranking_dir = str(CACHE)
+inst4._allow_uncensored = False
+inst4._allow_junk = False
+check("数据源：auto 命中缓存", inst4._fetch_detail("START-257").get("source") == "javranking")
+
+original = jcd.source.JavBusSource.fetch_detail
+def fake_fetch(self, code):
+    return {
+        "code": code, "title": "JavBus 回退", "release_date": "", "duration": "",
+        "detail_url": "", "magnets": [{"name": "X-C", "size_text": "1GB", "size_bytes": 1,
+                                       "date": "", "magnet": "magnet:?xt=urn:btih:" + "c" * 40,
+                                       "info_hash": "c" * 40}],
+    }
+jcd.source.JavBusSource.fetch_detail = fake_fetch
+try:
+    fallback = inst4._fetch_detail("ABF-394")
+    check("数据源：auto 无磁力回退 JavBus", fallback.get("source") == "javbus", str(fallback))
+finally:
+    jcd.source.JavBusSource.fetch_detail = original
 
 print("\nRESULT:", "ALL PASS" if not FAILURES else f"{len(FAILURES)} FAILED: {FAILURES}")
 sys.exit(1 if FAILURES else 0)

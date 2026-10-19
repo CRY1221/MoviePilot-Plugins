@@ -16,6 +16,18 @@
 配置项包括 CloudDrive2 地址与令牌、云下载目录、库目录、是否移动、是否允许无码破解资源、
 任务推进间隔与最长等待时间。任务由插件注册的定时服务异步推进，也可通过插件 API 手动触发。
 
+
+## 数据源
+
+插件设置里的「数据源」有三档：
+
+- `javbus`：直连 JavBus，默认
+- `javranking`：只读本地缓存；没有详情页磁力的番号会直接报错
+- `auto`：优先 JavRanking 缓存，缓存没有磁力或不可用时回退 JavBus
+
+JavRanking 缓存由 `tools/fetch_javranking_cache.py` 在 MP 容器内用浏览器抓取，
+再由 `tools/build_javranking_cache.py` 整理成 `javranking.db`。
+
 ## 已归档
 
 **极速搜索 · FastIntersectSearch** 已于 2026-10-20 归档，不再维护。

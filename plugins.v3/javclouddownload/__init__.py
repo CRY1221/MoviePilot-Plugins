@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.plugins import _PluginBase
 from app.sdk.logging import logger
 
 from .cd2 import Cd2Client, Cd2Error, status_name
+from .javranking import JavRankingError, JavRankingSource
 from .pipeline import (
     ACTIVE_STATES,
     STATE_DOWNLOADING,
@@ -44,7 +46,7 @@ class JavCloudDownload(_PluginBase):
     plugin_name = "番号云下载"
     plugin_desc = "按番号从 JavBus 取种，经 CloudDrive2 云下载到 115，完成后清理、改名并可移动到库目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.1.3"
+    plugin_version = "0.1.4"
     plugin_label = "工具"
     plugin_author = "CRY1221"
     plugin_config_prefix = "javclouddownload_"
@@ -66,6 +68,8 @@ class JavCloudDownload(_PluginBase):
     _delete_junk_only = True
     _poll_minutes = 5
     _max_wait_minutes = 240
+    _source_mode = "javbus"
+    _javranking_dir = ""
     _status = "未启用"
 
     def __init__(self) -> None:
@@ -85,6 +89,11 @@ class JavCloudDownload(_PluginBase):
         config = config or {}
         self._enabled = bool(config.get("enabled"))
         self._source_base = (config.get("source_base") or "https://www.javbus.com").strip()
+        self._source_mode = (config.get("source_mode") or "javbus").strip().lower()
+        if self._source_mode not in ("javbus", "javranking", "auto"):
+            self._source_mode = "javbus"
+        default_cache = str(Path(self.get_data_path()) / "javranking")
+        self._javranking_dir = (config.get("javranking_dir") or default_cache).strip()
         self._cd2_host = (config.get("cd2_host") or "").strip()
         self._cd2_port = int(config.get("cd2_port") or 19798)
         self._cd2_token = (config.get("cd2_token") or "").strip()
@@ -111,7 +120,9 @@ class JavCloudDownload(_PluginBase):
         if not self._cd2_token and not self._cd2_username:
             self._status = "配置不完整：需要 API 令牌或账号密码"
             return
-        self._status = f"运行中，云下载目录 {self._download_dir}"
+        self._status = (
+            f"运行中，数据源 {self._source_mode}，云下载目录 {self._download_dir}"
+        )
 
     def get_state(self) -> bool:
         """返回插件启用状态。"""
@@ -177,6 +188,42 @@ class JavCloudDownload(_PluginBase):
 
     # ---------- 核心动作 ----------
 
+    def _fetch_detail(self, code: str) -> Dict[str, Any]:
+        """
+        按配置的数据源读取番号详情。
+
+        ``auto`` 优先用 JavRanking 缓存；缓存没有磁力或不可用时回退 JavBus。
+
+        :param code: 番号
+        :return: 详情字典
+        """
+        normalized = normalize_code(code)
+        if self._source_mode in ("javranking", "auto"):
+            try:
+                detail = JavRankingSource(self._javranking_dir).fetch_detail(normalized)
+                if self._source_mode == "javranking":
+                    if not detail.get("magnets"):
+                        raise JavRankingError(
+                            f"JavRanking 缓存没有 {normalized} 的磁力；"
+                            "请先刷新详情页，或把数据源改为 auto/javbus"
+                        )
+                    return detail
+                if detail.get("magnets"):
+                    return detail
+                logger.info(f"JavRanking 缓存无磁力，回退 JavBus：{normalized}")
+            except JavRankingError as error:
+                if self._source_mode == "javranking":
+                    raise
+                logger.info(f"JavRanking 缓存不可用，回退 JavBus：{error}")
+
+        source = JavBusSource(base_url=self._source_base)
+        try:
+            detail = source.fetch_detail(normalized)
+            detail["source"] = "javbus"
+            return detail
+        finally:
+            source.close()
+
     def preview(self, code: str) -> Dict[str, Any]:
         """
         只抓取并展示候选，不提交任何任务。
@@ -184,19 +231,16 @@ class JavCloudDownload(_PluginBase):
         :param code: 番号
         :return: 候选与选种结果
         """
-        normalized = normalize_code(code)
-        source = JavBusSource(base_url=self._source_base)
-        try:
-            detail = source.fetch_detail(normalized)
-        finally:
-            source.close()
+        detail = self._fetch_detail(code)
         picked = select(
             detail["magnets"],
             allow_uncensored=self._allow_uncensored,
             allow_junk=self._allow_junk,
         )
         return {
-            "code": detail.get("code") or normalized,
+            "code": detail.get("code") or normalize_code(code),
+            "source": detail.get("source"),
+            "has_magnets": detail.get("has_magnets", bool(detail.get("magnets"))),
             "title": detail.get("title"),
             "release_date": detail.get("release_date"),
             "duration": detail.get("duration"),
@@ -261,6 +305,7 @@ class JavCloudDownload(_PluginBase):
                 "size_text": chosen.get("size_text"),
                 "info_hash": chosen.get("info_hash") or info_hash_of(chosen.get("magnet", "")),
                 "title": detail.get("title"),
+                "source": detail.get("source"),
             }
         )
         self._stamp(record)
@@ -529,7 +574,7 @@ class JavCloudDownload(_PluginBase):
                 "methods": ["GET"],
                 "auth": "apikey",
                 "summary": "预览候选磁力",
-                "description": "按番号抓取 JavBus 候选磁力并给出选种结果，不提交任务",
+                "description": "按当前数据源读取番号候选磁力并给出选种结果，不提交任务",
             },
             {
                 "path": "/submit",
@@ -563,6 +608,30 @@ class JavCloudDownload(_PluginBase):
                 "summary": "立即推进任务",
                 "description": "立即执行一次任务推进，不必等待定时服务",
             },
+            {
+                "path": "/sources",
+                "endpoint": self.api_sources,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "数据源状态",
+                "description": "返回当前数据源、JavRanking 缓存统计与可用能力",
+            },
+            {
+                "path": "/ranking",
+                "endpoint": self.api_ranking,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "JavRanking 榜单",
+                "description": "读取本地缓存的榜单，如 main / javlibrary_top250 / javdb_top250",
+            },
+            {
+                "path": "/lookup",
+                "endpoint": self.api_lookup,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "番号缓存查询",
+                "description": "查询 JavRanking 缓存中的番号、标题、详情页与磁力缓存状态",
+            },
         ]
 
     def api_preview(self, code: str = "") -> Dict[str, Any]:
@@ -576,7 +645,7 @@ class JavCloudDownload(_PluginBase):
             return {"ok": False, "reason": "缺少 code 参数"}
         try:
             return {"ok": True, "data": self.preview(code)}
-        except (JavBusError, Cd2Error) as error:
+        except (JavBusError, Cd2Error, JavRankingError) as error:
             return {"ok": False, "reason": str(error)}
 
     def api_submit(self, payload: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -628,6 +697,52 @@ class JavCloudDownload(_PluginBase):
         finally:
             client.close()
 
+    def api_sources(self) -> Dict[str, Any]:
+        """返回数据源与 JavRanking 缓存状态。"""
+        try:
+            stats = JavRankingSource(self._javranking_dir).stats()
+        except JavRankingError as error:
+            stats = {"available": False, "error": str(error)}
+        return {
+            "ok": True,
+            "data": {
+                "mode": self._source_mode,
+                "sources": [
+                    {
+                        "name": "javbus",
+                        "available": True,
+                        "capabilities": ["metadata", "magnets"],
+                    },
+                    {
+                        "name": "javranking",
+                        "available": bool(stats.get("available")),
+                        "capabilities": ["metadata", "rankings", "magnets_if_cached"],
+                        "stats": stats,
+                    },
+                ],
+            },
+        }
+
+    def api_ranking(self, list_name: str = "main", limit: int = 50) -> Dict[str, Any]:
+        """读取 JavRanking 本地榜单。"""
+        try:
+            rows = JavRankingSource(self._javranking_dir).rankings(list_name, limit)
+            return {"ok": True, "list": list_name, "total": len(rows), "items": rows}
+        except JavRankingError as error:
+            return {"ok": False, "reason": str(error)}
+
+    def api_lookup(self, code: str = "") -> Dict[str, Any]:
+        """查询番号在 JavRanking 缓存中的状态。"""
+        if not code:
+            return {"ok": False, "reason": "缺少 code 参数"}
+        try:
+            item = JavRankingSource(self._javranking_dir).lookup(code)
+            if item is None:
+                return {"ok": False, "reason": f"JavRanking 缓存中没有番号 {code}"}
+            return {"ok": True, "data": item}
+        except JavRankingError as error:
+            return {"ok": False, "reason": str(error)}
+
     def api_advance(self) -> Dict[str, Any]:
         """立即推进一次任务。"""
         return {"ok": True, "summary": self.advance_tasks(0)}
@@ -675,6 +790,43 @@ class JavCloudDownload(_PluginBase):
                                             "label": "只保留主视频",
                                             "hint": "开启时只保留体积最大的视频和字幕，删除推广小视频；关闭时保留全部视频，只删非视频文件",
                                             "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 5},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "source_mode",
+                                            "label": "数据源",
+                                            "items": [
+                                                {"title": "JavBus（直连）", "value": "javbus"},
+                                                {"title": "JavRanking（本地缓存）", "value": "javranking"},
+                                                {"title": "自动（JavRanking 优先，缺失回退 JavBus）", "value": "auto"},
+                                            ],
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 7},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "javranking_dir",
+                                            "label": "JavRanking 缓存目录",
+                                            "placeholder": "留空使用插件数据目录/javranking",
                                         },
                                     }
                                 ],
@@ -862,13 +1014,17 @@ class JavCloudDownload(_PluginBase):
                     {
                         "component": "VAlert",
                         "props": {"type": "info", "variant": "tonal"},
-                        "text": "选种顺序：第一会所新片 > 4K > 中文字幕 > 体积最大；"
+                        "text": "数据源：JavBus 直连可用；JavRanking 读取本地缓存，"
+                                "没有详情页缓存的番号无法取磁力，可改用「自动」回退 JavBus。"
+                                "选种顺序：第一会所新片 > 4K > 中文字幕 > 体积最大；"
                                 "无码破解与广告资源默认排除。任务由定时服务异步推进。",
                     },
                 ],
             }
         ], {
             "enabled": False,
+            "source_mode": "javbus",
+            "javranking_dir": "",
             "source_base": "https://www.javbus.com",
             "cd2_host": "192.168.5.103",
             "cd2_port": 19798,
@@ -895,12 +1051,28 @@ class JavCloudDownload(_PluginBase):
             f"{r.get('code')}｜{r.get('state')}｜{r.get('percent', 0)}%｜{r.get('message') or ''}"
             for r in items
         ]
+        try:
+            stats = JavRankingSource(self._javranking_dir).stats()
+            if stats.get("available"):
+                cache_text = (
+                    f"数据源：{self._source_mode}｜JavRanking 缓存："
+                    f"{stats.get('videos', 0)} 部，详情 {stats.get('details', 0)} 条"
+                )
+            else:
+                cache_text = f"数据源：{self._source_mode}｜JavRanking 缓存未就绪"
+        except JavRankingError as error:
+            cache_text = f"数据源：{self._source_mode}｜JavRanking 缓存读取失败：{error}"
         pages: List[dict] = [
             {
                 "component": "VAlert",
                 "props": {"type": "info", "variant": "tonal"},
                 "text": self._status,
-            }
+            },
+            {
+                "component": "VAlert",
+                "props": {"type": "secondary", "variant": "tonal"},
+                "text": cache_text,
+            },
         ]
         if lines:
             pages.append(
