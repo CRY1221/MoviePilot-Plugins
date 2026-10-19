@@ -2,7 +2,7 @@
   "JavCloudDownload": {
     "name": "番号云下载",
     "description": "按番号从 JavBus / JavRanking 取种，经 CloudDrive2 提交 115 离线下载；完成后清理、按番号[-C] 重命名，可选洗版、主动低清扫库并移动到 Emby 库目录。",
-    "version": "0.8.0",
+    "version": "0.8.1",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "CRY1221",
     "level": 1,
@@ -19,7 +19,8 @@
       "v0.1.4": "新增数据源选择：JavBus 直连 / JavRanking 本地缓存 / 自动回退；新增 /sources、/ranking、/lookup API。",
       "v0.1.5": "整理阶段识别 CD1/CD2、part1/part2 等多段资源并全部保留；小体积伪分段与已有完整成片的场景不会误删主视频。",
       "v0.1.6": "选种改为中文字幕优先于 4K；4K 体积门槛 5GB，低于门槛视为假 4K 排除；明确 720P 排除；多段文件按 Emby 规则命名。",
-      "v0.1.7": "小于 300MB 的视频视为垃圾，阈值可调；新增识别筛选规则开关，关闭后直接按体积最大。"
+      "v0.1.7": "小于 300MB 的视频视为垃圾，阈值可调；新增识别筛选规则开关，关闭后直接按体积最大。",
+      "v0.8.1": "选种更正：4K 与 2160P 都算 4K，标 4K 但不足 5GB 为假 4K；名称里的 6K/8K 不再换算码率；普通下载查询 Emby 时不再 ffprobe，只有洗版才探测。"
     }
   }
 }

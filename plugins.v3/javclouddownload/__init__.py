@@ -90,7 +90,7 @@ class JavCloudDownload(_PluginBase):
     plugin_name = "番号云下载"
     plugin_desc = "按番号从 JavBus 取种，经 CloudDrive2 云下载到 115，完成后清理、改名并可移动到库目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.8.0"
+    plugin_version = "0.8.1"
     plugin_label = "工具"
     plugin_author = "CRY1221"
     plugin_config_prefix = "javclouddownload_"
@@ -325,8 +325,13 @@ class JavCloudDownload(_PluginBase):
             "message": "",
         }
 
-    def _find_library_item(self, code: str):
-        """查询 Emby 成人库；必要时用 CD2 ffprobe 补真实质量。"""
+    def _find_library_item(self, code: str, probe_missing: bool = True):
+        """
+        查询 Emby 成人库；必要时用 CD2 ffprobe 补真实质量。
+
+        :param code: 归一化番号
+        :param probe_missing: Emby 缺高度/体积时是否用 ffprobe 补；普通下载传 False
+        """
         try:
             hit = EmbyLibrary(self._emby_library, self._library_map).find_item(code)
         except Exception as error:
@@ -342,7 +347,8 @@ class JavCloudDownload(_PluginBase):
             if detail:
                 detailed = quality_from_item(detail)
                 quality.update({k: v for k, v in detailed.items() if v})
-        if (not quality.get("height") or not quality.get("size")) and hit.path:
+        if (probe_missing and (not quality.get("height") or not quality.get("size"))
+                and hit.path):
             client = None
             try:
                 client = self._client()
@@ -986,8 +992,8 @@ class JavCloudDownload(_PluginBase):
         :return: 处理结果
         """
         name = safe_name(code)
-        existing = self._find_library_item(code)
         upgrade_requested = bool(self._enable_upgrade and (upgrade or force))
+        existing = self._find_library_item(code, probe_missing=upgrade_requested)
         if existing is not None and not upgrade_requested:
             record = self._tasks.get(code) or self._new_record(code, name)
             record["name"] = name

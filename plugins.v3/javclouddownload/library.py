@@ -22,11 +22,9 @@ from app.sdk.logging import logger
 from .cd2 import Cd2Client
 from .selector import has_chinese_sub, is_720p, is_uhd
 
-# 只要明确的 1440P；发布名里的 2K 通常是 2000kbps 码率
+# 只要明确的 1440P；裸 2K 含义不固定，不猜
 RES_2K_PATTERN = re.compile(r"(?:^|[\s._\-])(?:1440P|1440I)(?:$|[\s._\-])", re.I)
 RES_1080_PATTERN = re.compile(r"(?:^|[\s._\-])(?:1080P|1080I|FHD)(?:$|[\s._\-])", re.I)
-# JAV 发布名里的 4K/6K/8K 多数表示码率（4000/6000/8000 kbps）
-BITRATE_TAG_PATTERN = re.compile(r"(?:^|[\s._\-])([468])K(?:$|[\s._\-])", re.I)
 
 # Emby 条目里常见的中文字幕语言标记
 CHINESE_SUB_LANGS = {"chi", "zho", "zh", "chs", "cht", "cn"}
@@ -120,10 +118,9 @@ def estimate_candidate_quality(name: str, size_bytes: int) -> Dict[str, Any]:
         height = 720
     elif RES_1080_PATTERN.search(name or ""):
         height = 1080
-    bitrate_tag = BITRATE_TAG_PATTERN.search(name or "")
     return {
         "height": height,
-        "bitrate": int(bitrate_tag.group(1)) * 1_000_000 if bitrate_tag else 0,
+        "bitrate": 0,
         "size": int(size_bytes or 0),
         "has_chinese_sub": has_chinese_sub(name),
     }

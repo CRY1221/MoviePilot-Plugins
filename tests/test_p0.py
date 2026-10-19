@@ -18,6 +18,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 import types
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -313,7 +314,7 @@ def _tidy_multipart_case(prefix: str):
 client, result = _tidy_multipart_case("OLD")
 check("多段：两个分段都保留", "/dl/multi/OLD-CD1.mp4" not in client.deleted and "/dl/multi/OLD-CD2.mp4" not in client.deleted, str(client.deleted))
 check("多段：推广视频仍删除", "/dl/multi/sample.mp4" in client.deleted, str(client.deleted))
-check("多段：两个分段都改名", ("/dl/multi/OLD-CD1.mp4", "ABC-123 - cd1.mp4") in client.renamed and ("/dl/multi/OLD-CD2.mp4", "ABC-123 - cd2.mp4") in client.renamed, str(client.renamed))
+check("多段：两个分段都改名", ("/dl/multi/OLD-CD1.mp4", "ABC-123 - part1.mp4") in client.renamed and ("/dl/multi/OLD-CD2.mp4", "ABC-123 - part2.mp4") in client.renamed, str(client.renamed))
 check("多段：final_files 两条", len(result.get("final_files") or []) == 2, str(result))
 check("多段：目录改名", result.get("final_dir") == "/dl/ABC-123", str(result))
 
@@ -325,7 +326,40 @@ tree = {
 }
 client = _FakeClient(tree, {"/dl/part"})
 result = pipeline.tidy_dir(client, "/dl/part", "XYZ-999", delete_junk_only=True)
-check("多段：part1/part2 识别", ("/dl/part/OLD-part1.mkv", "XYZ-999 - cd1.mkv") in client.renamed and ("/dl/part/OLD-part2.mkv", "XYZ-999 - cd2.mkv") in client.renamed, str(client.renamed))
+check("多段：part1/part2 识别", ("/dl/part/OLD-part1.mkv", "XYZ-999 - part1.mkv") in client.renamed and ("/dl/part/OLD-part2.mkv", "XYZ-999 - part2.mkv") in client.renamed, str(client.renamed))
+
+tree = {
+    "/dl/cn": [
+        _File("main.mp4", 10 * GB),
+        _File("main.chs.srt", 100 * 1024),
+    ]
+}
+client = _FakeClient(tree, {"/dl/cn"})
+result = pipeline.tidy_dir(
+    client, "/dl/cn", "ABC-123", delete_junk_only=True, file_name="ABC-123-C"
+)
+check("中文单文件：番号带 -C",
+      ("/dl/cn/main.mp4", "ABC-123-C.mp4") in client.renamed,
+      str(client.renamed))
+check("中文单文件：字幕跟随改名",
+      ("/dl/cn/main.chs.srt", "ABC-123-C.chs.srt") in client.renamed,
+      str(client.renamed))
+
+tree = {
+    "/dl/cnpart": [
+        _File("OLD-CD0.mp4", 6 * GB),
+        _File("OLD-CD1.mp4", 6 * GB),
+    ]
+}
+client = _FakeClient(tree, {"/dl/cnpart"})
+result = pipeline.tidy_dir(
+    client, "/dl/cnpart", "ABC-123", delete_junk_only=True,
+    file_name="ABC-123-C",
+)
+check("中文多段：part 从 1 开始",
+      ("/dl/cnpart/OLD-CD0.mp4", "ABC-123-C - part1.mp4") in client.renamed
+      and ("/dl/cnpart/OLD-CD1.mp4", "ABC-123-C - part2.mp4") in client.renamed,
+      str(client.renamed))
 
 tree = {
     "/dl/full": [
@@ -401,6 +435,32 @@ check("init_plugin 保留已存任务", inst._store["tasks"].get("ABC-123") is n
 fresh = jcd.JavCloudDownload()
 check("默认配置不含个人 CD2 地址", fresh._cd2_host == "", fresh._cd2_host)
 check("默认配置不含个人下载目录", fresh._download_dir == "", fresh._download_dir)
+form, defaults = fresh.get_form()
+check("配置文件包含主动洗版",
+      "proactive_upgrade" in json.dumps(form, ensure_ascii=False)
+      and defaults.get("proactive_upgrade") is False,
+      str(defaults.get("proactive_upgrade")))
+
+one_obj = jcd.JavCloudDownload()
+one_calls = []
+one_obj.scan_proactive = lambda: one_calls.append(True)
+one_config = {
+    "enabled": True,
+    "cd2_host": "cd2.example.com",
+    "cd2_token": "x",
+    "download_dir": "/cloud/download",
+    "emby_library": "成人影片",
+    "enable_upgrade": True,
+    "proactive_upgrade": True,
+}
+one_obj.init_plugin(one_config)
+time.sleep(0.05)
+one_obj.init_plugin(one_config)
+time.sleep(0.05)
+check("主动洗版：开启后只扫一次",
+      len(one_calls) == 1
+      and one_obj._store.get("proactive_state", {}).get("enabled") is True,
+      f"{one_calls} {one_obj._store.get('proactive_state')}")
 
 missing_dir = jcd.JavCloudDownload()
 missing_dir.init_plugin({"enabled": True, "cd2_host": "cd2.example.com", "cd2_token": "x"})
@@ -528,28 +588,27 @@ q_1080 = media_library.estimate_candidate_quality("ABC-123 FHD", 5 * GB)
 check("候选估算：2160P 达 5GB 算 2160", q_4k["height"] == 2160, str(q_4k))
 check("候选估算：2160P 不足 5GB 不算 2160", q_fake_4k["height"] != 2160, str(q_fake_4k))
 check("候选估算：1440P 算 1440", q_2k["height"] == 1440, str(q_2k))
-check("候选估算：6K 是码率标签，不算分辨率",
+check("候选估算：6K 不当作分辨率标签",
       media_library.estimate_candidate_quality(
           "IPX-899_6K-C 高清", 5723043921)["height"] == 0)
-check("候选估算：6K 读出 6Mbps",
+check("候选估算：名称不解析码率",
       media_library.estimate_candidate_quality(
-          "IPX-899_6K-C 高清", 5723043921)["bitrate"] == 6_000_000)
-check("洗版判断：6000kbps 对 5746kbps 不算升级",
+          "IPX-899_6K-C 高清", 5723043921)["bitrate"] == 0)
+check("洗版判断：同 1080 且体积不足 1.5 倍不洗",
       media_library.candidate_may_be_better(
           {"height": 1080, "bitrate": 5746007, "size": 5345542264},
           media_library.estimate_candidate_quality("IPX-899_6K-C 高清", 5723043921),
       ) is False)
 _q8k = media_library.estimate_candidate_quality("X 8K", 6 * GB)
-check("洗版判断：8000kbps 对 5746kbps 可洗",
-      media_library.candidate_may_be_better(
-          {"height": 1080, "bitrate": 5746007, "size": 5345542264},
-          _q8k,
-      ) is True, str(_q8k))
-check("候选估算：2K 是码率标签，不算 1440",
+check("候选估算：8K 不猜测分辨率与码率",
+      _q8k["height"] == 0 and _q8k["bitrate"] == 0, str(_q8k))
+check("候选估算：裸 2K 不猜，不算 1440",
       media_library.estimate_candidate_quality(
           "IPX-899_2K-C 字幕", 1986422374)["height"] == 0)
-check("候选估算：裸 4K 是码率标签，不算 2160",
-      media_library.estimate_candidate_quality("X 4K", 6 * GB)["height"] == 0)
+check("候选估算：裸 4K 达 5GB 算 2160",
+      media_library.estimate_candidate_quality("X 4K", 6 * GB)["height"] == 2160)
+check("候选估算：裸 4K 不足 5GB 不算 2160",
+      media_library.estimate_candidate_quality("X 4K", 4 * GB)["height"] == 0)
 check("候选估算：FHD 算 1080", q_1080["height"] == 1080, str(q_1080))
 
 existing_1080 = {"height": 1080, "size": 5 * GB, "bitrate": 8_000_000,
@@ -586,7 +645,7 @@ hit = media_library.LibraryHit(
     quality=existing_1080,
 )
 skip_obj = _retry_instance()
-skip_obj._find_library_item = lambda code: hit
+skip_obj._find_library_item = lambda code, probe_missing=True: hit
 skip_obj._enable_upgrade = False
 skip_obj.preview = lambda code: (_ for _ in ()).throw(AssertionError("不应搜索"))
 skip_result = skip_obj._submit_one("ABC-123", 0)
@@ -595,8 +654,23 @@ check("库内有且未开洗版：直接跳过",
       and skip_obj._tasks["ABC-123"].get("state") == jcd.STATE_SKIPPED,
       str(skip_result))
 
+_probe_calls = []
+
+
+def _record_probe(code, probe_missing=True):
+    _probe_calls.append(probe_missing)
+    return hit
+
+
+probe_obj = _retry_instance()
+probe_obj._find_library_item = _record_probe
+probe_obj._enable_upgrade = False
+probe_obj.preview = lambda code: (_ for _ in ()).throw(AssertionError("不应搜索"))
+probe_obj._submit_one("ABC-123", 0)
+check("普通下载不探测库内文件", _probe_calls == [False], str(_probe_calls))
+
 upgrade_obj = _retry_instance()
-upgrade_obj._find_library_item = lambda code: hit
+upgrade_obj._find_library_item = lambda code, probe_missing=True: hit
 upgrade_obj._enable_upgrade = True
 upgrade_obj.preview = lambda code: {
     "code": code, "tier": "中文字幕", "chosen": base_candidate,
@@ -609,7 +683,7 @@ check("开洗版但候选不够好：跳过",
 
 upgrade_client = _FakeClient({}, set())
 upgrade_download = _retry_instance()
-upgrade_download._find_library_item = lambda code: hit
+upgrade_download._find_library_item = lambda code, probe_missing=True: hit
 upgrade_download._enable_upgrade = True
 upgrade_download.preview = lambda code: {
     "code": code, "tier": "4K", "chosen": q_4k_candidate,
@@ -627,7 +701,7 @@ exist_client = _FakeClient(
     {"/dl/ABC-123"},
 )
 exist_obj = _retry_instance()
-exist_obj._find_library_item = lambda code: None
+exist_obj._find_library_item = lambda code, probe_missing=True: None
 exist_obj._move_enabled = True
 exist_obj._library_dir = "/lib"
 exist_obj._delete_junk_only = True
@@ -902,10 +976,216 @@ check("排队超时也换种",
       and queue_client.deleted == ["/dl/c0"],
       str(queue_record))
 
+_original_probe = jcd.probe_media
+jcd.probe_media = lambda client, path: {
+    "height": 480, "width": 856, "bitrate": 1_100_000, "size": GB,
+}
+low_client = _FakeClient(
+    {"/dl/ABC-123": [_File("ABC-123.mp4", GB)]}, {"/dl/ABC-123"}
+)
+low_obj = _retry_instance()
+low_record = _candidate_record(low_obj, prepared)
+low_record["state"] = jcd.STATE_FINISHED
+low_record["existing"] = {"quality": {"height": 1080, "size": 2 * GB}}
+low_obj._organize(low_client, low_record)
+check("低清：删除已下载文件", "/dl/ABC-123" in low_client.deleted,
+      str(low_client.deleted))
+check("低清：换下一条候选",
+      low_record.get("candidate_index") == 1
+      and low_client.added[-1][0] == prepared[1]["magnet"],
+      str(low_record))
+
+low_only_client = _FakeClient(
+    {"/dl/ABC-123": [_File("ABC-123.mp4", GB)]}, {"/dl/ABC-123"}
+)
+low_only_obj = _retry_instance()
+low_only_record = _candidate_record(low_only_obj, prepared[:1])
+low_only_record["state"] = jcd.STATE_FINISHED
+low_only_record["existing"] = {"quality": {"height": 1080, "size": 2 * GB}}
+low_only_obj._organize(low_only_client, low_only_record)
+check("低清：所有候选耗尽后失败",
+      low_only_record.get("state") == jcd.STATE_FAILED
+      and "低于 720P" in (low_only_record.get("message") or ""),
+      str(low_only_record))
+
+probe_calls = []
+jcd.probe_media = lambda client, path: (
+    probe_calls.append(path) or {"height": 480, "width": 856, "size": GB}
+)
+normal_client = _FakeClient(
+    {"/dl/ABC-123": [_File("ABC-123.mp4", GB)]}, {"/dl/ABC-123"}
+)
+normal_obj = _retry_instance()
+normal_record = _candidate_record(normal_obj, prepared)
+normal_record["state"] = jcd.STATE_FINISHED
+normal_obj._organize(normal_client, normal_record)
+check("普通下载不跑 ffprobe",
+      probe_calls == [] and normal_record.get("state") == jcd.STATE_ORGANIZED,
+      f"{probe_calls} {normal_record.get('state')}")
+
+jcd.probe_media = lambda client, path: {
+    "height": 1080, "width": 1920, "bitrate": 5_000_000, "size": GB,
+}
+cn_client = _FakeClient(
+    {"/dl/ABC-123": [_File("ABC-123.mp4", GB)]}, {"/dl/ABC-123"}
+)
+cn_obj = _retry_instance()
+cn_record = _candidate_record(cn_obj, [_candidate("ABC-123-C", "a")])
+cn_record["state"] = jcd.STATE_FINISHED
+cn_obj._organize(cn_client, cn_record)
+check("整理：中文字幕文件名带 -C",
+      ("/dl/ABC-123/ABC-123.mp4", "ABC-123-C.mp4") in cn_client.renamed,
+      str(cn_client.renamed))
+check("整理：文件名不再带分辨率",
+      (cn_record.get("final_files") or [""])[0].endswith("/ABC-123-C.mp4"),
+      str(cn_record.get("final_files")))
+jcd.probe_media = _original_probe
+
 service_obj = _retry_instance()
 service_obj._enabled = True
 service = service_obj.get_service()[0]
 check("定时服务使用秒级间隔", service.get("kwargs") == {"seconds": 10}, str(service))
+
+# ---------- 主动洗版 ----------
+
+pro_obj = _retry_instance()
+pro_obj._enabled = True
+pro_obj._proactive_enabled = True
+pro_obj._enable_upgrade = True
+pro_obj._emby_library = "成人影片"
+pro_obj._proactive = {}
+pro_obj._scan_low_res = lambda: [{
+    "code": "SNIS-854", "title": "SNIS-854", "path": "/adult/SNIS-854/SNIS-854.mp4",
+    "item_id": "1", "height": 480, "width": 856, "bitrate": 1_100_000, "size": GB,
+}]
+first_scan = pro_obj.scan_proactive()
+check("主动洗版：发现低清并发提醒",
+      first_scan.get("notified") == 1
+      and pro_obj.messages[-1].get("buttons")
+      and pro_obj.messages[-1]["buttons"][0][0].get("callback_data")
+      == "[PLUGIN]JavCloudDownload|proactive:upgrade:SNIS-854",
+      str(first_scan))
+check("主动洗版：记录为已提醒",
+      pro_obj._proactive["SNIS-854"].get("status") == "notified",
+      str(pro_obj._proactive))
+pro_obj.scan_proactive()
+check("主动洗版：已提醒不重复发",
+      sum("低清扫描" in str(m.get("title")) for m in pro_obj.messages) == 1,
+      str(pro_obj.messages))
+pro_obj.handle_proactive_action("dismiss", "SNIS-854")
+check("主动洗版：忽略后落记录",
+      pro_obj._proactive["SNIS-854"].get("status") == "declined",
+      str(pro_obj._proactive))
+pro_obj.scan_proactive()
+check("主动洗版：忽略后不再提醒",
+      sum("低清扫描" in str(m.get("title")) for m in pro_obj.messages) == 1,
+      str(pro_obj.messages))
+
+up_obj = _retry_instance()
+up_obj._enabled = True
+up_obj._proactive_enabled = True
+up_obj._enable_upgrade = True
+up_obj._emby_library = "成人影片"
+up_obj._proactive = {}
+up_obj._scan_low_res = lambda: [{
+    "code": "KAWD-722", "title": "KAWD-722", "path": "/adult/KAWD-722/KAWD-722.mp4",
+    "item_id": "2", "height": 404, "width": 700, "bitrate": 1_200_000, "size": GB,
+}]
+up_obj.scan_proactive()
+up_calls = []
+up_obj.submit = lambda codes, **kwargs: (
+    up_calls.append((codes, kwargs)) or {"ok": True, "items": [{"ok": True, "state": "submitted"}]}
+)
+up_result = up_obj.handle_proactive_action("upgrade", "KAWD-722")
+check("主动洗版：选择洗版后提交",
+      up_result.get("status") == "upgrading"
+      and up_calls == [(["KAWD-722"], {"wait_seconds": 0, "upgrade": True, "force": True})],
+      f"{up_result} {up_calls}")
+
+svc2_obj = _retry_instance()
+svc2_obj._enabled = True
+svc2_obj._proactive_enabled = True
+svc2_obj._enable_upgrade = True
+svc2_obj._emby_library = "成人影片"
+check("主动洗版：不注册长期扫描服务",
+      len(svc2_obj.get_service()) == 1,
+      str(svc2_obj.get_service()))
+
+many_obj = _retry_instance()
+many_obj._enabled = True
+many_obj._proactive_enabled = True
+many_obj._enable_upgrade = True
+many_obj._emby_library = "成人影片"
+many_obj._proactive = {}
+many_obj._scan_low_res = lambda: [
+    {
+        "code": f"AAA-{index:03d}", "title": f"AAA-{index:03d}",
+        "path": f"/adult/AAA-{index:03d}/AAA-{index:03d}.mp4",
+        "item_id": str(index), "height": 720, "width": 1280,
+        "bitrate": 4_000_000, "size": GB,
+    }
+    for index in range(1, 8)
+]
+many_obj.scan_proactive()
+summary = many_obj.messages[-1]
+summary_text = str(summary.get("text") or "")
+check("主动洗版：一次汇总通知",
+      len(many_obj.messages) == 1
+      and "共 7 条" in str(summary.get("title") or ""),
+      str(many_obj.messages))
+check("主动洗版：只列前5条",
+      "5. AAA-005" in summary_text
+      and "6. AAA-006" not in summary_text
+      and "其余 2 条" in summary_text,
+      summary_text)
+check("主动洗版：前5条可操作，其余待处理",
+      len(summary.get("buttons") or []) == 5
+      and many_obj._proactive["AAA-001"].get("status") == "notified"
+      and many_obj._proactive["AAA-006"].get("status") == "pending",
+      str(many_obj._proactive))
+
+class _FakeEmbyInstance:
+    def __init__(self, items):
+        self.items = items
+
+    def get_librarys(self):
+        return []
+
+    def get_data(self, url):
+        return type("_Resp", (), {"json": lambda _self: {"Items": self.items}})()
+
+
+def _emby_item(code, height):
+    return {
+        "Id": code,
+        "Name": code,
+        "Path": f"/adult/{code}/{code}.mp4",
+        "MediaSources": [{
+            "Height": height, "Width": 1920, "Size": GB,
+            "MediaStreams": [{"Type": "Video", "Height": height, "Width": 1920}],
+        }],
+    }
+
+
+_original_services = media_library.EmbyLibrary._services
+media_library.EmbyLibrary._services = staticmethod(
+    lambda: {"emby": type("_Svc", (), {"instance": _FakeEmbyInstance([
+        _emby_item("SNIS-854", 480),
+        _emby_item("IPZ-127", 404),
+        _emby_item("IPZ-127", 404),
+        _emby_item("MIX-001", 720),
+        _emby_item("MIX-001", 1080),
+        _emby_item("SSNI-424", 1080),
+    ])})()}
+)
+low_rows = media_library.EmbyLibrary("", "").list_low_res(1080)
+check("Emby 低清扫描：低于1080才返回",
+      {row["code"] for row in low_rows} == {"SNIS-854", "IPZ-127"},
+      str(low_rows))
+check("Emby 低清扫描：同番号取最高版本",
+      next(row for row in low_rows if row["code"] == "IPZ-127")["height"] == 404,
+      str(low_rows))
+media_library.EmbyLibrary._services = _original_services
 
 
 # ---------- 选种规则：4K 门槛、中字优先、720P ----------
@@ -916,6 +1196,11 @@ def _magnet(name, gb):
 
 check("2160P 门槛：4GB 不算 2160P", selector.is_uhd("X 2160P", 4 * GB) is False)
 check("2160P 门槛：5GB 算 2160P", selector.is_uhd("X 2160P", 5 * GB) is True)
+check("4K 门槛：裸 4K 达 5GB 算 4K", selector.is_uhd("X 4K", 6 * GB) is True)
+check("4K 门槛：裸 4K 不足 5GB 是假4K", selector.is_fake_uhd("X 4K", 4 * GB) is True)
+check("4K 门槛：4K 与 2160P 同档",
+      selector.rank(_magnet("X 4K", 6)) == selector.rank(_magnet("X 2160P", 6)))
+check("6K 不作 4K 判断", selector.is_uhd("X 6K", 6 * GB) is False)
 
 picked = selector.select([_magnet("X 2160P 4GB", 4), _magnet("X-C 1080p", 6)])
 check("假4K被排除", (picked.get("chosen") or {}).get("name") == "X-C 1080p", str(picked))
@@ -930,6 +1215,18 @@ check("2160P优先于普通大体积", (picked.get("chosen") or {}).get("name") 
 picked = selector.select([_magnet("X 720P 10GB", 10), _magnet("X 5GB", 5)])
 check("720P被排除", (picked.get("chosen") or {}).get("name") == "X 5GB", str(picked))
 check("720P记录原因", any(x.get("reason") == "720P" for x in picked.get("excluded", [])), str(picked.get("excluded")))
+
+picked = selector.select([_magnet("X 480P 10GB", 10), _magnet("X 5GB", 5)])
+check("480P被排除", (picked.get("chosen") or {}).get("name") == "X 5GB", str(picked))
+check("480P记录原因", any(x.get("reason") == "480P/360P" for x in picked.get("excluded", [])), str(picked.get("excluded")))
+
+picked = selector.select([_magnet("X-C 1GB", 1), _magnet("X 6GB", 6)])
+check("中字体积不足一半不优先", (picked.get("chosen") or {}).get("name") == "X 6GB", str(picked))
+check("中字体积不足一半不改档位", picked.get("tier") == "体积最大", str(picked))
+
+picked = selector.select([_magnet("第一會所新片@SIS001@X 2GB", 2), _magnet("X 6GB", 6)])
+check("来源标签不再优先", (picked.get("chosen") or {}).get("name") == "X 6GB", str(picked))
+check("来源标签不再改档位", picked.get("tier") == "体积最大", str(picked))
 
 # ---------- 小视频阈值与规则开关 ----------
 
