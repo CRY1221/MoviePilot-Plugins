@@ -121,7 +121,7 @@ sys.modules.update({
 })
 sys.path.insert(0, TMP)
 jcd = importlib.import_module("jcd")
-from jcd import pipeline, source  # noqa: E402
+from jcd import pipeline, selector, source  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -213,7 +213,7 @@ def _tidy_multipart_case(prefix: str):
 client, result = _tidy_multipart_case("OLD")
 check("多段：两个分段都保留", "/dl/multi/OLD-CD1.mp4" not in client.deleted and "/dl/multi/OLD-CD2.mp4" not in client.deleted, str(client.deleted))
 check("多段：推广视频仍删除", "/dl/multi/sample.mp4" in client.deleted, str(client.deleted))
-check("多段：两个分段都改名", ("/dl/multi/OLD-CD1.mp4", "ABC-123-CD1.mp4") in client.renamed and ("/dl/multi/OLD-CD2.mp4", "ABC-123-CD2.mp4") in client.renamed, str(client.renamed))
+check("多段：两个分段都改名", ("/dl/multi/OLD-CD1.mp4", "ABC-123 - cd1.mp4") in client.renamed and ("/dl/multi/OLD-CD2.mp4", "ABC-123 - cd2.mp4") in client.renamed, str(client.renamed))
 check("多段：final_files 两条", len(result.get("final_files") or []) == 2, str(result))
 check("多段：目录改名", result.get("final_dir") == "/dl/ABC-123", str(result))
 
@@ -225,7 +225,7 @@ tree = {
 }
 client = _FakeClient(tree, {"/dl/part"})
 result = pipeline.tidy_dir(client, "/dl/part", "XYZ-999", delete_junk_only=True)
-check("多段：part1/part2 识别", ("/dl/part/OLD-part1.mkv", "XYZ-999-PART1.mkv") in client.renamed and ("/dl/part/OLD-part2.mkv", "XYZ-999-PART2.mkv") in client.renamed, str(client.renamed))
+check("多段：part1/part2 识别", ("/dl/part/OLD-part1.mkv", "XYZ-999 - cd1.mkv") in client.renamed and ("/dl/part/OLD-part2.mkv", "XYZ-999 - cd2.mkv") in client.renamed, str(client.renamed))
 
 tree = {
     "/dl/full": [
@@ -317,6 +317,29 @@ limited = {"code": "ABC-123", "organize_attempts": jcd.MAX_ORGANIZE_ATTEMPTS + 1
 gave_up = inst2._organize_give_up(limited, "未找到落盘目录")
 check("整理超过上限停止重试", gave_up and limited.get("state") == "failed", str(limited))
 
+
+# ---------- 选种规则：4K 门槛、中字优先、720P ----------
+
+def _magnet(name, gb):
+    return {"name": name, "size_text": f"{gb}GB", "size_bytes": int(gb * GB),
+            "date": "", "magnet": "magnet:?xt=urn:btih:" + "d" * 40, "info_hash": "d" * 40}
+
+check("4K 门槛：4GB 不算 4K", selector.is_uhd("X 4K", 4 * GB) is False)
+check("4K 门槛：5GB 算 4K", selector.is_uhd("X 4K", 5 * GB) is True)
+
+picked = selector.select([_magnet("X 4K 4GB", 4), _magnet("X-C 1080p", 6)])
+check("假4K被排除", (picked.get("chosen") or {}).get("name") == "X-C 1080p", str(picked))
+check("假4K记录原因", any(x.get("reason", "").startswith("假4K") for x in picked.get("excluded", [])), str(picked.get("excluded")))
+
+picked = selector.select([_magnet("X 4K 6GB", 6), _magnet("X-C 5GB", 5)])
+check("中字优先于4K", (picked.get("chosen") or {}).get("name") == "X-C 5GB", str(picked))
+
+picked = selector.select([_magnet("X 4K 6GB", 6), _magnet("X 10GB", 10)])
+check("4K优先于普通大体积", (picked.get("chosen") or {}).get("name") == "X 4K 6GB", str(picked))
+
+picked = selector.select([_magnet("X 720P 10GB", 10), _magnet("X 5GB", 5)])
+check("720P被排除", (picked.get("chosen") or {}).get("name") == "X 5GB", str(picked))
+check("720P记录原因", any(x.get("reason") == "720P" for x in picked.get("excluded", [])), str(picked.get("excluded")))
 
 # ---------- JavRanking 缓存数据源 ----------
 

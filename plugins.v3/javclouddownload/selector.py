@@ -3,15 +3,17 @@
 
 排序优先级（从高到低）：
 1. 带「第一会所新片」标志（``第一會所新片`` / ``SIS001``）；
-2. 4K / UHD；
-3. 中文字幕（``-C`` / ``_CH`` / ``中字`` / ``字幕``）；
+2. 中文字幕（``-C`` / ``_CH`` / ``中字`` / ``字幕``）；
+3. 4K / UHD，且体积不小于 5GB；
 4. 其余。
 
 硬性排除（列出即出局）：
 - 无码破解 ``-U`` / ``-UC`` / ``uncensored``；
+- 假 4K：标了 4K/UHD/2160P，但体积小于 5GB；
+- 720P / 720I；
 - 广告或非视频资源（命名含推广域名、纯压缩包等）。
 
-同一档内按体积从大到小取。
+同一档内按体积从大到小取；不把分辨率标签当作主要质量依据。
 """
 
 from __future__ import annotations
@@ -25,6 +27,12 @@ SIS001_PATTERNS = ("第一會所新片", "第一会所新片", "SIS001", "sis001
 # 4K 标志
 UHD_PATTERN = re.compile(r"(?:^|[\s._\-\[@])(?:4K|UHD|2160P|2160I)(?:$|[\s._\-\]@])", re.I)
 
+# 低于该体积的 4K 视为假 4K
+UHD_MIN_SIZE = 5 * 1024 ** 3
+
+# 明确标注 720P 的资源直接排除
+RES_720_PATTERN = re.compile(r"(?:^|[\s._\-])(?:720P|720I)(?:$|[\s._\-])", re.I)
+
 # 中文字幕标志
 CHS_PATTERN = re.compile(r"(?:^|[\s._\-])(?:C|CH|CHS|CHT)(?:$|[\s._\-])|中字|字幕|中文字幕", re.I)
 
@@ -35,14 +43,14 @@ UNCENSORED_PATTERN = re.compile(
 
 # 广告或非视频资源
 JUNK_PATTERN = re.compile(
-    r"\.(?:zip|rar|7z|iso)$|(?:\.cc|\.com|\.net|\.xyz|\.top|\.vip)[\s@_-]|"
+    r"\.(?:zip|rar|7z)$|(?:\.cc|\.com|\.net|\.xyz|\.top|\.vip)[\s@_-]|"
     r"游戏大全|推广|广告",
     re.I,
 )
 
 VIDEO_EXT = {
     ".mp4", ".mkv", ".avi", ".wmv", ".ts", ".m2ts", ".mov",
-    ".flv", ".rmvb", ".rm", ".mpg", ".mpeg", ".webm", ".iso",
+    ".flv", ".rmvb", ".rm", ".mpg", ".mpeg", ".webm",
 }
 
 
@@ -57,14 +65,43 @@ def has_sis001(name: str) -> bool:
     return any(pattern.lower() in lowered for pattern in SIS001_PATTERNS)
 
 
-def is_uhd(name: str) -> bool:
+def is_uhd(name: str, size_bytes: int = 0) -> bool:
     """
-    判断是否为 4K/UHD 资源。
+    判断是否为可信的 4K/UHD 资源。
+
+    标了 4K 但体积小于 5GB 的视为假 4K，不进入 4K 档；体积未知时也不按 4K 排。
+
+    :param name: 磁力名称
+    :param size_bytes: 体积字节数
+    :return: 可信 4K 返回 True
+    """
+    if not UHD_PATTERN.search(name or ""):
+        return False
+    return int(size_bytes or 0) >= UHD_MIN_SIZE
+
+
+def is_fake_uhd(name: str, size_bytes: int = 0) -> bool:
+    """
+    判断是否为标了 4K 但体积不足的假 4K。
+
+    :param name: 磁力名称
+    :param size_bytes: 体积字节数
+    :return: 假 4K 返回 True
+    """
+    if not UHD_PATTERN.search(name or ""):
+        return False
+    size = int(size_bytes or 0)
+    return 0 < size < UHD_MIN_SIZE
+
+
+def is_720p(name: str) -> bool:
+    """
+    判断是否明确标注 720P/720I。
 
     :param name: 磁力名称
     :return: 命中返回 True
     """
-    return bool(UHD_PATTERN.search(name or ""))
+    return bool(RES_720_PATTERN.search(name or ""))
 
 
 def has_chinese_sub(name: str) -> bool:
@@ -107,16 +144,17 @@ def rank(magnet: Dict[str, Any]) -> tuple:
     :return: 可直接用于 sorted 的元组
     """
     name = magnet.get("name") or ""
+    size_bytes = int(magnet.get("size_bytes") or 0)
     if has_sis001(name):
         tier = 0
-    elif is_uhd(name):
-        tier = 1
     elif has_chinese_sub(name):
+        tier = 1
+    elif is_uhd(name, size_bytes):
         tier = 2
     else:
         tier = 3
     # 同档内体积大的优先，因此体积取负值
-    return (tier, -int(magnet.get("size_bytes") or 0))
+    return (tier, -size_bytes)
 
 
 def select(
@@ -137,9 +175,14 @@ def select(
 
     for magnet in magnets:
         name = magnet.get("name") or ""
+        size_bytes = int(magnet.get("size_bytes") or 0)
         reason = None
         if not allow_uncensored and is_uncensored(name):
             reason = "无码破解"
+        elif is_fake_uhd(name, size_bytes):
+            reason = "假4K（小于5GB）"
+        elif is_720p(name):
+            reason = "720P"
         elif not allow_junk and is_junk(name):
             reason = "广告或非视频"
         if reason:
@@ -159,12 +202,13 @@ def select(
     ordered = sorted(candidates, key=rank)
     chosen = ordered[0]
     name = chosen.get("name") or ""
+    size_bytes = int(chosen.get("size_bytes") or 0)
     if has_sis001(name):
         tier = "第一会所新片"
-    elif is_uhd(name):
-        tier = "4K"
     elif has_chinese_sub(name):
         tier = "中文字幕"
+    elif is_uhd(name, size_bytes):
+        tier = "4K"
     else:
         tier = "体积最大"
     return {

@@ -34,7 +34,7 @@ INVALID_NAME_CHARS = re.compile(r'[\\/:*?"<>|]')
 # 视频扩展名集合，与选种模块保持一致
 VIDEO_EXT_SET = {
     ".mp4", ".mkv", ".avi", ".wmv", ".ts", ".m2ts", ".mov",
-    ".flv", ".rmvb", ".rm", ".mpg", ".mpeg", ".webm", ".iso",
+    ".flv", ".rmvb", ".rm", ".mpg", ".mpeg", ".webm",
 }
 
 # 字幕扩展名集合：整理时随视频保留
@@ -255,9 +255,10 @@ def tidy_dir(client: Cd2Client, target: str, name: str,
     rename_map: List[tuple[str, str]] = []
     renamed_files: List[str] = []
     if parts:
-        for item, (_base, label, _number) in parts:
+        for item, (_base, _label, number) in parts:
             suffix = PurePosixPath(item[2]).suffix
-            target_name = f"{name}-{label}{suffix}"
+            # Emby 多段命名：<名称> - cd1.ext / <名称> - cd2.ext
+            target_name = f"{name} - cd{number}{suffix}"
             actual = item[2]
             if target_name != item[2]:
                 if client.rename(item[0], target_name):
