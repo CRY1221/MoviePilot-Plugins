@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.plugins import _PluginBase
 from app.sdk.logging import logger
+from app.schemas.types import MessageType
 
 from .cd2 import Cd2Client, Cd2Error, status_name
 from .javranking import JavRankingError, JavRankingSource
@@ -39,6 +40,15 @@ MAX_RECORDS = 200
 # 整理阶段连续失败多少次后停止重试
 MAX_ORGANIZE_ATTEMPTS = 5
 
+# 删除旧离线任务连续失败多少次后停止换种
+MAX_REMOVE_ATTEMPTS = 3
+
+DEFAULT_POLL_SECONDS = 10
+MIN_POLL_SECONDS = 5
+DEFAULT_CANDIDATE_TIMEOUT_MINUTES = 5
+DEFAULT_QUEUE_TIMEOUT_MINUTES = 10
+DEFAULT_MAX_CANDIDATES = 3
+
 
 class JavCloudDownload(_PluginBase):
     """番号云下载插件主类。"""
@@ -46,7 +56,7 @@ class JavCloudDownload(_PluginBase):
     plugin_name = "番号云下载"
     plugin_desc = "按番号从 JavBus 取种，经 CloudDrive2 云下载到 115，完成后清理、改名并可移动到库目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.1.8"
+    plugin_version = "0.2.0"
     plugin_label = "工具"
     plugin_author = "CRY1221"
     plugin_config_prefix = "javclouddownload_"
@@ -66,7 +76,10 @@ class JavCloudDownload(_PluginBase):
     _allow_uncensored = False
     _allow_junk = False
     _delete_junk_only = True
-    _poll_minutes = 5
+    _poll_seconds = DEFAULT_POLL_SECONDS
+    _candidate_timeout_minutes = DEFAULT_CANDIDATE_TIMEOUT_MINUTES
+    _candidate_queue_timeout_minutes = DEFAULT_QUEUE_TIMEOUT_MINUTES
+    _max_candidates = DEFAULT_MAX_CANDIDATES
     _max_wait_minutes = 240
     _source_mode = "javbus"
     _javranking_dir = ""
@@ -80,6 +93,7 @@ class JavCloudDownload(_PluginBase):
         super().__init__()
         self._tasks: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
+        self._poll_lock = threading.Lock()
 
     def init_plugin(self, config: dict = None) -> None:
         """
@@ -112,7 +126,23 @@ class JavCloudDownload(_PluginBase):
         self._allow_uncensored = bool(config.get("allow_uncensored"))
         self._allow_junk = bool(config.get("allow_junk"))
         self._delete_junk_only = bool(config.get("delete_junk_only", True))
-        self._poll_minutes = max(1, int(config.get("poll_minutes") or 5))
+        self._poll_seconds = max(
+            MIN_POLL_SECONDS,
+            int(config.get("poll_seconds") or DEFAULT_POLL_SECONDS),
+        )
+        self._candidate_timeout_minutes = max(
+            1,
+            int(config.get("candidate_timeout_minutes") or DEFAULT_CANDIDATE_TIMEOUT_MINUTES),
+        )
+        self._candidate_queue_timeout_minutes = max(
+            1,
+            int(config.get("candidate_queue_timeout_minutes") or DEFAULT_QUEUE_TIMEOUT_MINUTES),
+        )
+        self._max_candidates = max(
+            1,
+            int(config.get("max_candidates") or DEFAULT_MAX_CANDIDATES),
+        )
+        # 旧版本配置，仅用于兼容升级前已经在运行的任务
         self._max_wait_minutes = max(5, int(config.get("max_wait_minutes") or 240))
 
         stored = self.get_data("tasks") or {}
@@ -148,7 +178,7 @@ class JavCloudDownload(_PluginBase):
                 "name": "番号云下载任务推进",
                 "trigger": "interval",
                 "func": self.advance_tasks,
-                "kwargs": {"minutes": self._poll_minutes},
+                "kwargs": {"seconds": self._poll_seconds},
             }
         ]
 
@@ -193,8 +223,179 @@ class JavCloudDownload(_PluginBase):
             "updated_at": now,
             "attempts": 0,
             "organize_attempts": 0,
+            "remove_attempts": 0,
+            "candidates": [],
+            "candidate_index": -1,
+            "candidate_started_at": "",
+            "candidate_attempts": [],
+            "notified_finish": False,
+            "notified_failure": False,
             "message": "",
         }
+
+    @staticmethod
+    def _elapsed_minutes(value: str) -> float:
+        """
+        计算某个时间点到现在的分钟数。
+
+        :param value: ``YYYY-MM-DD HH:MM:SS`` 格式时间
+        :return: 已过去的分钟数；无法解析时返回 0
+        """
+        try:
+            started = datetime.strptime(value or "", "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return 0.0
+        return (datetime.now() - started).total_seconds() / 60
+
+    def _prepare_candidates(self, detail: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        把选种结果整理成可重试的候选列表。
+
+        按 infoHash 去重，最多保留 ``max_candidates`` 条。
+
+        :param detail: ``preview`` 返回的详情
+        :return: 候选列表
+        """
+        raw = list(detail.get("candidates") or [])
+        chosen = detail.get("chosen")
+        if chosen and chosen not in raw:
+            raw.insert(0, chosen)
+
+        result: List[Dict[str, Any]] = []
+        seen = set()
+        for item in raw:
+            magnet = (item.get("magnet") or "").strip()
+            if not magnet:
+                continue
+            key = (item.get("info_hash") or info_hash_of(magnet) or magnet).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(
+                {
+                    "name": item.get("name") or "",
+                    "magnet": magnet,
+                    "info_hash": item.get("info_hash") or info_hash_of(magnet),
+                    "size_bytes": int(item.get("size_bytes") or 0),
+                    "size_text": item.get("size_text") or "",
+                }
+            )
+            if len(result) >= self._max_candidates:
+                break
+        return result
+
+    def _record_attempt(self, record: Dict[str, Any], result: str,
+                        detail: str = "") -> None:
+        """
+        记录当前候选的结束原因，便于排查换种过程。
+
+        :param record: 任务记录
+        :param result: ``finished`` / ``timeout`` / ``error`` / ``submit_failed``
+        :param detail: 补充说明
+        """
+        index = int(record.get("candidate_index") or 0)
+        candidates = record.get("candidates") or []
+        candidate = candidates[index] if 0 <= index < len(candidates) else {}
+        attempts = record.setdefault("candidate_attempts", [])
+        attempts.append(
+            {
+                "index": index,
+                "name": candidate.get("name") or "",
+                "info_hash": candidate.get("info_hash") or "",
+                "started_at": record.get("submitted_at") or "",
+                "ended_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "result": result,
+                "detail": detail,
+            }
+        )
+
+    def _begin_candidate(self, client: Cd2Client, record: Dict[str, Any],
+                         index: int) -> bool:
+        """
+        提交指定候选并重置该候选的计时状态。
+
+        :param client: CD2 客户端
+        :param record: 任务记录
+        :param index: 候选下标
+        :return: 提交成功返回 True
+        """
+        candidates = record.get("candidates") or []
+        if index < 0 or index >= len(candidates):
+            return False
+        candidate = candidates[index]
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        record.update(
+            {
+                "candidate_index": index,
+                "magnet": candidate.get("magnet") or "",
+                "info_hash": candidate.get("info_hash") or "",
+                "magnet_name": candidate.get("name") or "",
+                "size_bytes": int(candidate.get("size_bytes") or 0),
+                "size_text": candidate.get("size_text") or "",
+                "state": STATE_SUBMITTED,
+                "submitted_at": now,
+                "candidate_started_at": "",
+                "offline_state": "",
+                "percent": 0,
+                "task_name": "",
+                "remove_attempts": 0,
+                "organize_attempts": 0,
+                "attempts": 0,
+                "message": f"提交候选 {index + 1}/{len(candidates)}",
+            }
+        )
+        self._stamp(record)
+        try:
+            submission = client.add_offline(
+                candidate["magnet"], record.get("folder") or self._download_dir
+            )
+        except Cd2Error as error:
+            self._record_attempt(record, "submit_failed", str(error))
+            record["message"] = f"候选 {index + 1} 提交失败：{error}"
+            self._stamp(record)
+            return False
+        record["message"] = (
+            f"已提交候选 {index + 1}/{len(candidates)}（{submission}）"
+        )
+        self._stamp(record)
+        return True
+
+    def _notify_finish(self, record: Dict[str, Any]) -> None:
+        """发送一次下载完成通知。"""
+        if record.get("notified_finish"):
+            return
+        record["notified_finish"] = True
+        try:
+            self.post_message(
+                mtype=MessageType.Plugin,
+                title=f"番号云下载完成：{record.get('code')}",
+                text=(
+                    f"{record.get('name') or record.get('code')} "
+                    f"{record.get('size_text') or ''} 已下载完成，开始整理"
+                ).strip(),
+            )
+        except Exception as error:  # 通知失败不影响下载与整理
+            logger.warning(f"番号云下载完成通知发送失败：{error}")
+
+    def _notify_failure(self, record: Dict[str, Any], message: str) -> None:
+        """发送一次最终失败通知。"""
+        if record.get("notified_failure"):
+            return
+        record["notified_failure"] = True
+        try:
+            self.post_message(
+                mtype=MessageType.Plugin,
+                title=f"番号云下载失败：{record.get('code')}",
+                text=f"{record.get('name') or record.get('code')}：{message}",
+            )
+        except Exception as error:
+            logger.warning(f"番号云下载失败通知发送失败：{error}")
+
+    def _fail(self, record: Dict[str, Any], message: str) -> None:
+        """把任务标记为最终失败并发通知。"""
+        record.update({"state": STATE_FAILED, "message": message})
+        self._stamp(record)
+        self._notify_failure(record, message)
 
     # ---------- 核心动作 ----------
 
@@ -289,6 +490,7 @@ class JavCloudDownload(_PluginBase):
                 record = self._tasks.get(normalized) or self._new_record(normalized, normalized)
                 record.update({"state": STATE_FAILED, "message": str(error)})
                 self._stamp(record)
+                self._notify_failure(record, str(error))
                 with self._lock:
                     self._tasks[normalized] = record
                 results.append({"code": normalized, "ok": False, "reason": str(error)})
@@ -304,22 +506,28 @@ class JavCloudDownload(_PluginBase):
         :return: 处理结果
         """
         detail = self.preview(code)
-        chosen = detail.get("chosen")
-        if not chosen:
+        if not detail.get("chosen") and not detail.get("candidates"):
             raise JavBusError(f"{code} 没有可用磁力")
         if not self._download_dir:
             raise Cd2Error("未配置云下载目录，请先在插件设置中填写")
+        candidates = self._prepare_candidates(detail)
+        if not candidates:
+            raise JavBusError(f"{code} 没有可提交的候选磁力")
         name = safe_name(detail.get("code") or code)
         record = self._tasks.get(code) or self._new_record(code, name)
         record.update(
             {
                 "name": name,
                 "tier": detail.get("tier"),
-                "magnet_name": chosen.get("name"),
-                "size_text": chosen.get("size_text"),
-                "info_hash": chosen.get("info_hash") or info_hash_of(chosen.get("magnet", "")),
                 "title": detail.get("title"),
                 "source": detail.get("source"),
+                "candidates": candidates,
+                "candidate_index": -1,
+                "candidate_started_at": "",
+                "candidate_attempts": [],
+                "remove_attempts": 0,
+                "notified_finish": False,
+                "notified_failure": False,
             }
         )
         self._stamp(record)
@@ -351,15 +559,15 @@ class JavCloudDownload(_PluginBase):
                 record.update({"state": STATE_FAILED, "message": "115 离线配额已用完"})
                 self._stamp(record)
                 return {"code": code, "ok": False, "reason": record["message"]}
-            submission = client.add_offline(chosen["magnet"], self._download_dir)
-            record.update({
-                "state": STATE_SUBMITTED,
-                "message": f"已提交（{submission}）",
-                "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "attempts": 0,
-                "organize_attempts": 0,
-            })
-            self._stamp(record)
+
+            submitted = False
+            for index in range(len(candidates)):
+                if self._begin_candidate(client, record, index):
+                    submitted = True
+                    break
+            if not submitted:
+                self._fail(record, "所有候选磁力都提交失败")
+                return {"code": code, "ok": False, "reason": record["message"]}
             if wait_seconds > 0:
                 self._advance_record(client, record, wait_seconds)
         finally:
@@ -393,14 +601,65 @@ class JavCloudDownload(_PluginBase):
         elapsed_minutes = (datetime.now() - submitted_at).total_seconds() / 60
         return elapsed_minutes > self._max_wait_minutes
 
-    def _advance_record(self, client: Cd2Client, record: Dict[str, Any],
-                        wait_seconds: int = 0) -> None:
+    @staticmethod
+    def _offline_index(tasks: List[Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
-        推进单条任务：查状态 → 整理 → 移动。
+        把离线任务列表整理成 infoHash / 名称索引。
+
+        :param tasks: ``client.list_offline`` 返回的任务列表
+        :return: ``(按 infoHash, 按名称)`` 两个字典
+        """
+        by_hash: Dict[str, Any] = {}
+        by_name: Dict[str, Any] = {}
+        for task in tasks:
+            info_hash = (getattr(task, "infoHash", "") or "").lower()
+            if info_hash:
+                by_hash[info_hash] = task
+            name = getattr(task, "name", "") or ""
+            if name and name not in by_name:
+                by_name[name] = task
+        return by_hash, by_name
+
+    def _lookup_offline(self, client: Cd2Client, record: Dict[str, Any],
+                        offline_index: Optional[Tuple[Dict[str, Any], Dict[str, Any]]]
+                        ) -> Optional[Any]:
+        """
+        在当前候选的离线任务列表中定位任务。
 
         :param client: CD2 客户端
         :param record: 任务记录
-        :param wait_seconds: 单次等待秒数；0 表示只检查一次
+        :param offline_index: 批量索引；None 时回退到单次查询
+        :return: 离线任务；未找到返回 None
+        """
+        folder = record.get("folder") or self._download_dir
+        info_hash = record.get("info_hash") or ""
+        if offline_index is not None:
+            by_hash, by_name = offline_index
+            target = info_hash.lower()
+            if target and target in by_hash:
+                return by_hash[target]
+            for candidate_name in (
+                record.get("task_name"),
+                record.get("magnet_name"),
+                record.get("name"),
+            ):
+                if candidate_name and candidate_name in by_name:
+                    return by_name[candidate_name]
+            return None
+        return client.find_offline(
+            folder,
+            info_hash=info_hash,
+            name=record.get("task_name") or record.get("name") or "",
+        )
+
+    def _advance_legacy(self, client: Cd2Client, record: Dict[str, Any],
+                        wait_seconds: int = 0) -> None:
+        """
+        推进升级前创建的旧任务，保持原有 240 分钟等待行为。
+
+        :param client: CD2 客户端
+        :param record: 旧任务记录
+        :param wait_seconds: 未使用，保留签名一致性
         """
         code = record.get("code") or ""
         name = record.get("name") or code
@@ -413,17 +672,16 @@ class JavCloudDownload(_PluginBase):
         try:
             task = client.find_offline(folder, info_hash=info_hash, name=name)
         except Cd2Error as error:
-            record.update({"state": STATE_FAILED, "message": str(error)})
+            record.update({"message": f"查询离线任务失败，稍后重试：{error}"})
             self._stamp(record)
             return
 
         if task is None:
             if self._wait_exceeded(record):
-                record.update({
-                    "state": STATE_FAILED,
-                    "message": f"下载等待超过 {self._max_wait_minutes} 分钟，未查询到离线任务",
-                })
-                self._stamp(record)
+                self._fail(
+                    record,
+                    f"下载等待超过 {self._max_wait_minutes} 分钟，未查询到离线任务",
+                )
                 return
             record["message"] = "尚未查询到离线任务"
             self._stamp(record)
@@ -434,17 +692,15 @@ class JavCloudDownload(_PluginBase):
         record["offline_state"] = state
         record["percent"] = round(float(task.percendDone or 0), 1)
         if state == "OFFLINE_ERROR":
-            record.update({"state": STATE_FAILED, "message": "云下载任务失败"})
-            self._stamp(record)
+            self._fail(record, "云下载任务失败")
             return
         if state != "OFFLINE_FINISHED":
             if self._wait_exceeded(record):
-                record.update({
-                    "state": STATE_FAILED,
-                    "message": f"下载等待超过 {self._max_wait_minutes} 分钟"
-                               f"（最后状态 {state} {record['percent']}%）",
-                })
-                self._stamp(record)
+                self._fail(
+                    record,
+                    f"下载等待超过 {self._max_wait_minutes} 分钟"
+                    f"（最后状态 {state} {record['percent']}%）",
+                )
                 return
             record.update({"state": STATE_DOWNLOADING,
                            "message": f"下载中 {record['percent']}%"})
@@ -454,7 +710,153 @@ class JavCloudDownload(_PluginBase):
         record["state"] = STATE_FINISHED
         record["message"] = "下载完成，开始整理"
         self._stamp(record)
+        self._notify_finish(record)
         self._organize(client, record, wait_seconds)
+
+    def _switch_candidate(self, client: Cd2Client, record: Dict[str, Any],
+                          reason: str, result: str = "timeout",
+                          task: Optional[Any] = None) -> None:
+        """
+        删除当前候选的离线任务，然后提交下一条候选。
+
+        删除失败时不提交下一条，避免两个任务同时下载。
+
+        :param client: CD2 客户端
+        :param record: 任务记录
+        :param reason: 换种原因
+        :param result: 写进 candidate_attempts 的结果
+        :param task: 当前离线任务；None 表示列表中还没出现
+        """
+        folder = record.get("folder") or self._download_dir
+        info_hash = record.get("info_hash") or ""
+        if task is not None and info_hash:
+            try:
+                removed = client.remove_offline(
+                    folder, [info_hash], delete_files=True
+                )
+                error_text = "" if removed else "删除接口返回失败"
+            except Exception as error:
+                removed = False
+                error_text = f"{type(error).__name__}: {error}"
+            if not removed:
+                attempts = int(record.get("remove_attempts") or 0) + 1
+                record["remove_attempts"] = attempts
+                record["message"] = (
+                    f"删除旧离线任务失败，重试 {attempts}/{MAX_REMOVE_ATTEMPTS}"
+                )
+                if attempts >= MAX_REMOVE_ATTEMPTS:
+                    self._fail(
+                        record,
+                        f"删除旧离线任务失败：{error_text or '未知错误'}",
+                    )
+                else:
+                    self._stamp(record)
+                return
+
+        record["remove_attempts"] = 0
+        self._record_attempt(record, result, reason)
+        candidates = record.get("candidates") or []
+        next_index = int(record.get("candidate_index") or 0) + 1
+        if next_index >= len(candidates):
+            self._fail(
+                record,
+                f"{len(candidates)} 条候选均未在时限内完成",
+            )
+            return
+        for index in range(next_index, len(candidates)):
+            if self._begin_candidate(client, record, index):
+                return
+        self._fail(record, "所有候选磁力都提交失败")
+
+    def _advance_record(self, client: Cd2Client, record: Dict[str, Any],
+                        wait_seconds: int = 0,
+                        offline_index: Optional[Tuple[Dict[str, Any], Dict[str, Any]]] = None
+                        ) -> None:
+        """
+        推进单条任务：查状态 → 整理 / 超时换种。
+
+        :param client: CD2 客户端
+        :param record: 任务记录
+        :param wait_seconds: 单次等待秒数；0 表示只检查一次
+        :param offline_index: 本轮批量拉取的离线任务索引
+        """
+        if record.get("state") == STATE_FINISHED:
+            self._organize(client, record, wait_seconds)
+            return
+        if not record.get("candidates"):
+            self._advance_legacy(client, record, wait_seconds)
+            return
+
+        record["attempts"] = int(record.get("attempts") or 0) + 1
+        task = self._lookup_offline(client, record, offline_index)
+
+        if task is None:
+            if self._elapsed_minutes(record.get("submitted_at")) >= self._candidate_queue_timeout_minutes:
+                self._switch_candidate(
+                    client, record,
+                    f"任务启动超过 {self._candidate_queue_timeout_minutes} 分钟",
+                    task=None,
+                )
+            else:
+                record.update({"state": STATE_SUBMITTED,
+                               "message": "等待 115 接收任务"})
+                self._stamp(record)
+            return
+
+        record["task_name"] = task.name
+        state = status_name(task.status)
+        record["offline_state"] = state
+        record["percent"] = round(float(task.percendDone or 0), 1)
+
+        if state == "OFFLINE_FINISHED":
+            record["state"] = STATE_FINISHED
+            record["message"] = "下载完成，开始整理"
+            self._record_attempt(record, "finished", f"{record['percent']}%")
+            self._stamp(record)
+            self._notify_finish(record)
+            self._organize(client, record, wait_seconds)
+            return
+
+        if state == "OFFLINE_ERROR":
+            self._switch_candidate(client, record, "离线任务失败", result="error", task=task)
+            return
+
+        if state == "OFFLINE_DOWNLOADING":
+            if not record.get("candidate_started_at"):
+                record["candidate_started_at"] = datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            elapsed = self._elapsed_minutes(record["candidate_started_at"])
+            if elapsed >= self._candidate_timeout_minutes:
+                self._switch_candidate(
+                    client, record,
+                    f"下载超过 {self._candidate_timeout_minutes} 分钟"
+                    f"（{record['percent']}%）",
+                    task=task,
+                )
+                return
+            record.update({
+                "state": STATE_DOWNLOADING,
+                "message": (
+                    f"下载中 {record['percent']}%"
+                    f"（候选 {int(record.get('candidate_index') or 0) + 1}"
+                    f"/{len(record.get('candidates') or [])}）"
+                ),
+            })
+            self._stamp(record)
+            return
+
+        # OFFLINE_INIT / OFFLINE_UNKNOWN：仍在排队，按启动超时处理
+        if self._elapsed_minutes(record.get("submitted_at")) >= self._candidate_queue_timeout_minutes:
+            self._switch_candidate(
+                client, record,
+                f"任务启动超过 {self._candidate_queue_timeout_minutes} 分钟（{state}）",
+                task=task,
+            )
+        else:
+            record.update({"state": STATE_SUBMITTED,
+                           "message": f"排队中（{state}）"})
+            self._stamp(record)
 
     def _organize_give_up(self, record: Dict[str, Any], message: str) -> bool:
         """
@@ -472,6 +874,7 @@ class JavCloudDownload(_PluginBase):
             "message": f"{message}（已重试 {attempts} 次）",
         })
         self._stamp(record)
+        self._notify_failure(record, record["message"])
         return True
 
     def _organize(self, client: Cd2Client, record: Dict[str, Any],
@@ -559,35 +962,65 @@ class JavCloudDownload(_PluginBase):
         """
         定时推进所有进行中的任务。
 
-        :param minutes: 服务注入的间隔参数，此处未使用
+        :param minutes: 兼容旧调度参数，此处未使用
         :return: 执行摘要
         """
         if not self._enabled:
             return "插件未启用"
-        with self._lock:
-            pending = [r for r in self._tasks.values() if r.get("state") in ACTIVE_STATES]
-        if not pending:
-            return "没有待推进的任务"
-        client = self._client()
-        done = failed = 0
+        if not self._poll_lock.acquire(blocking=False):
+            return "上一轮任务推进尚未结束"
         try:
-            for record in pending:
-                try:
-                    self._advance_record(client, record, 0)
-                    if record.get("state") in (STATE_ORGANIZED, STATE_MOVED):
-                        done += 1
-                    elif record.get("state") == STATE_FAILED:
+            with self._lock:
+                pending = [r for r in self._tasks.values() if r.get("state") in ACTIVE_STATES]
+            if not pending:
+                return "没有待推进的任务"
+            client = self._client()
+            done = failed = 0
+            try:
+                folders = {
+                    record.get("folder") or self._download_dir
+                    for record in pending
+                    if record.get("state") != STATE_FINISHED
+                }
+                offline_indexes: Dict[str, Optional[Tuple[Dict[str, Any], Dict[str, Any]]]] = {}
+                for folder in folders:
+                    try:
+                        offline_indexes[folder] = self._offline_index(
+                            client.list_offline(folder)
+                        )
+                    except Cd2Error as error:
+                        offline_indexes[folder] = None
+                        logger.warning(f"番号云下载读取离线列表失败：{error}")
+
+                for record in pending:
+                    folder = record.get("folder") or self._download_dir
+                    try:
+                        if record.get("state") == STATE_FINISHED:
+                            self._organize(client, record, 0)
+                        elif offline_indexes.get(folder) is None:
+                            record["message"] = "读取 CD2 离线列表失败，稍后重试"
+                            self._stamp(record)
+                        else:
+                            self._advance_record(
+                                client, record, 0,
+                                offline_index=offline_indexes.get(folder),
+                            )
+                        if record.get("state") in (STATE_ORGANIZED, STATE_MOVED):
+                            done += 1
+                        elif record.get("state") == STATE_FAILED:
+                            failed += 1
+                    except Exception as error:
+                        record["message"] = f"{type(error).__name__}: {error}"
+                        self._stamp(record)
                         failed += 1
-                except Exception as error:
-                    record["message"] = f"{type(error).__name__}: {error}"
-                    self._stamp(record)
-                    failed += 1
+            finally:
+                client.close()
+                self._persist()
+            summary = f"推进 {len(pending)} 条：完成 {done}，失败 {failed}"
+            logger.info(f"番号云下载 {summary}")
+            return summary
         finally:
-            client.close()
-            self._persist()
-        summary = f"推进 {len(pending)} 条：完成 {done}，失败 {failed}"
-        logger.info(f"番号云下载 {summary}")
-        return summary
+            self._poll_lock.release()
 
     # ---------- 扩展点 ----------
 
@@ -1038,35 +1471,76 @@ class JavCloudDownload(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 3},
                                 "content": [
                                     {
                                         "component": "VTextField",
                                         "props": {
-                                            "model": "poll_minutes",
-                                            "label": "任务推进间隔（分钟）",
+                                            "model": "poll_seconds",
+                                            "label": "轮询间隔（秒）",
                                             "type": "number",
+                                            "hint": "默认 10，最小 5",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 3},
                                 "content": [
                                     {
                                         "component": "VTextField",
                                         "props": {
-                                            "model": "max_wait_minutes",
-                                            "label": "下载最长等待（分钟）",
+                                            "model": "candidate_timeout_minutes",
+                                            "label": "单条候选超时（分钟）",
                                             "type": "number",
+                                            "hint": "进入下载后计时，默认 5",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "candidate_queue_timeout_minutes",
+                                            "label": "任务启动超时（分钟）",
+                                            "type": "number",
+                                            "hint": "从提交算起，默认 10",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "max_candidates",
+                                            "label": "最多尝试候选数",
+                                            "type": "number",
+                                            "hint": "默认 3",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -1108,7 +1582,10 @@ class JavCloudDownload(_PluginBase):
             "allow_uncensored": False,
             "allow_junk": False,
             "delete_junk_only": True,
-            "poll_minutes": 5,
+            "poll_seconds": DEFAULT_POLL_SECONDS,
+            "candidate_timeout_minutes": DEFAULT_CANDIDATE_TIMEOUT_MINUTES,
+            "candidate_queue_timeout_minutes": DEFAULT_QUEUE_TIMEOUT_MINUTES,
+            "max_candidates": DEFAULT_MAX_CANDIDATES,
             "max_wait_minutes": 240,
         }
 
