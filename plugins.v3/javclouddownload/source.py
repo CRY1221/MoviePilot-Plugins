@@ -182,22 +182,24 @@ class JavBusSource:
             return text
         raise JavBusError("连续触发限流，已放弃本次请求")
 
-    def resolve_path(self, code: str) -> str:
+    def _resolve(self, code: str) -> tuple[str, str]:
         """
-        用站内搜索确认番号对应的详情页路径。
+        确认番号对应的详情页，并返回已抓取的 HTML。
 
-        站点详情页可能带日期后缀（如 ``SUN-074_2026-10-18``），
-        因此不能直接用番号拼路径，必须先搜索。
+        多数番号可直接按番号访问；详情页可能带日期后缀（如
+        ``SUN-074_2026-10-18``），或直连落在 200 的空页上，因此用页面里
+        是否存在 ``gid`` 判断是否真的是详情页，不是再回退站内搜索。
 
         :param code: 归一化番号
-        :return: 详情页相对路径
+        :return: ``(详情页相对路径, 页面 HTML)``
         """
-        # 多数番号可直接按番号访问；站内搜索对部分番号返回 404，故先直连再回退搜索
+        direct = f"/{quote(code)}"
         try:
-            self._get(f"/{quote(code)}")
-            return f"/{quote(code)}"
+            html = self._get(direct)
         except JavBusError:
-            pass
+            html = ""
+        if html and re.search(r"var gid\s*=\s*\d+", html):
+            return direct, html
 
         try:
             html = self._get(f"/search/{quote(code)}")
@@ -207,12 +209,23 @@ class JavBusSource:
         if not links:
             raise JavBusError(f"站内未搜到番号 {code}")
         normalized = normalize_code(code)
+        target = links[0]
         # 优先精确匹配：路径最后一段归一化后等于番号
         for link in links:
             slug = link.rstrip("/").split("/")[-1]
             if normalize_code(slug) == normalized:
-                return link
-        return links[0]
+                target = link
+                break
+        return target, self._get(target)
+
+    def resolve_path(self, code: str) -> str:
+        """
+        兼容旧调用：只返回详情页相对路径。
+
+        :param code: 归一化番号
+        :return: 详情页相对路径
+        """
+        return self._resolve(code)[0]
 
     def fetch_detail(self, code: str) -> Dict[str, Any]:
         """
@@ -221,9 +234,8 @@ class JavBusSource:
         :param code: 番号
         :return: 含 title/genres/magnets 等字段的字典
         """
-        path = self.resolve_path(code)
+        path, html = self._resolve(code)
         detail_url = urljoin(self._base + "/", path.lstrip("/"))
-        html = self._get(path)
 
         gid = (re.search(r"var gid\s*=\s*(\d+)", html) or [None, None])[1]
         if not gid:

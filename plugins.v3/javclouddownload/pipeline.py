@@ -124,13 +124,17 @@ def tidy_dir(client: Cd2Client, target: str, name: str,
     :param client: CD2 客户端
     :param target: 目标目录
     :param name: 目标番号名
-    :param delete_junk_only: 为 True 时保留全部视频与字幕，只删其余文件
+    :param delete_junk_only: 为 True 时只保留主视频与字幕；为 False 时保留全部视频与字幕
     :return: 整理结果
     """
     files = collect_files(client, target)
     if not files:
         return {"ok": False, "reason": "目录为空或未落盘"}
 
+    videos = [
+        item for item in files
+        if PurePosixPath(item[2]).suffix.lower() in VIDEO_EXT_SET
+    ]
     video = pick_video(files)
     if video is None:
         return {"ok": False, "reason": "未找到视频文件", "files": [f[2] for f in files]}
@@ -140,18 +144,18 @@ def tidy_dir(client: Cd2Client, target: str, name: str,
         item for item in files
         if PurePosixPath(item[2]).suffix.lower() in SUBTITLE_EXT_SET
     ]
+    subtitle_paths = {item[0] for item in subtitles}
     if delete_junk_only:
-        # 保留全部视频与字幕，删除广告、链接等其余文件
-        keep_paths = {keep_path} | {item[0] for item in subtitles}
-        to_delete = [
-            (path, fname, size)
-            for path, size, fname in files
-            if path not in keep_paths
-        ]
+        # 默认：只保留体积最大的主视频与字幕，其余视频（含推广小视频）一并删除
+        keep_paths = {keep_path} | subtitle_paths
     else:
-        # 只保留体积最大的视频及其字幕
-        keep_paths = {keep_path} | {item[0] for item in subtitles}
-        to_delete = [item for item in files if item[0] not in keep_paths]
+        # 保留全部视频与字幕，只删除其余非视频文件
+        keep_paths = {item[0] for item in videos} | subtitle_paths
+    to_delete = [
+        (path, fname, size)
+        for path, size, fname in files
+        if path not in keep_paths
+    ]
 
     deleted: List[str] = []
     for path, fname, size in to_delete:
