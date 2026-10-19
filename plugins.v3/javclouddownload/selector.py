@@ -33,6 +33,9 @@ UHD_MIN_SIZE = 5 * 1024 ** 3
 # 明确标注 720P 的资源直接排除
 RES_720_PATTERN = re.compile(r"(?:^|[\s._\-])(?:720P|720I)(?:$|[\s._\-])", re.I)
 
+# 小于该体积的视频视为垃圾；可在插件设置里覆盖
+DEFAULT_MIN_VIDEO_SIZE = 300 * 1024 ** 2
+
 # 中文字幕标志
 CHS_PATTERN = re.compile(r"(?:^|[\s._\-])(?:C|CH|CHS|CHT)(?:$|[\s._\-])|中字|字幕|中文字幕", re.I)
 
@@ -161,6 +164,8 @@ def select(
     magnets: List[Dict[str, Any]],
     allow_uncensored: bool = False,
     allow_junk: bool = False,
+    enable_rules: bool = True,
+    min_video_size: int = DEFAULT_MIN_VIDEO_SIZE,
 ) -> Dict[str, Any]:
     """
     从候选列表中选出最佳磁力。
@@ -168,10 +173,35 @@ def select(
     :param magnets: ``source.fetch_detail`` 返回的 magnets 列表
     :param allow_uncensored: 是否允许无码破解资源
     :param allow_junk: 是否允许广告/压缩包类资源
+    :param enable_rules: 是否启用识别筛选规则；关闭时直接按体积最大
+    :param min_video_size: 小于该体积的候选视为垃圾
     :return: 含 chosen 与 rejected/excluded 说明的字典
     """
+    if not enable_rules:
+        ordered = sorted(
+            magnets, key=lambda item: -int(item.get("size_bytes") or 0)
+        )
+        if not ordered:
+            return {
+                "ok": False,
+                "reason": "没有候选",
+                "chosen": None,
+                "excluded": [],
+                "total": 0,
+            }
+        return {
+            "ok": True,
+            "chosen": ordered[0],
+            "tier": "体积最大（规则关闭）",
+            "excluded": [],
+            "total": len(magnets),
+            "candidates": ordered,
+        }
+
     candidates: List[Dict[str, Any]] = []
     excluded: List[Dict[str, Any]] = []
+    min_size = max(0, int(min_video_size or 0))
+    min_mb = round(min_size / 1024 ** 2)
 
     for magnet in magnets:
         name = magnet.get("name") or ""
@@ -183,6 +213,8 @@ def select(
             reason = "假4K（小于5GB）"
         elif is_720p(name):
             reason = "720P"
+        elif 0 < size_bytes < min_size:
+            reason = f"小于{min_mb}MB"
         elif not allow_junk and is_junk(name):
             reason = "广告或非视频"
         if reason:
