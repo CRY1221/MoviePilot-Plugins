@@ -40,6 +40,85 @@ VIDEO_EXT_SET = {
 # 字幕扩展名集合：整理时随视频保留
 SUBTITLE_EXT_SET = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt"}
 
+# 分段标记：CD1 / part2 / disc3 / 结尾 -1
+PART_MARKER = re.compile(
+    r"(?i)(?:^|[\s._\-])(?P<prefix>cd|part|pt|disc|disk)[\s._\-]?(?P<num>\d{1,2})$"
+)
+NUMERIC_MARKER = re.compile(r"(?i)(?:^|[\s._\-])(?P<num>\d{1,2})$")
+
+# 小于该体积的「分段」更可能是推广小视频，不参与多段识别
+MIN_PART_SIZE = 50 * 1024 ** 2
+
+
+def _split_part(stem: str) -> Optional[tuple[str, str, int]]:
+    """
+    从文件名去扩展名后的 stem 中拆出分段信息。
+
+    :param stem: 不含扩展名的文件名
+    :return: ``(基准名, 分段标签, 分段序号)``；不是分段文件时返回 None
+    """
+    marker = PART_MARKER.search(stem)
+    if marker:
+        prefix = marker.group("prefix").lower()
+        number = int(marker.group("num"))
+        label = f"{prefix.upper()}{number}"
+    else:
+        marker = NUMERIC_MARKER.search(stem)
+        if not marker:
+            return None
+        number = int(marker.group("num"))
+        label = f"CD{number}"
+    base = (stem[:marker.start()] + stem[marker.end():]).strip(" ._-")
+    if not base:
+        return None
+    return base, label, number
+
+
+def _detect_parts(videos: List[tuple]) -> Optional[List[tuple]]:
+    """
+    识别同一部影片的多个分段文件。
+
+    只接受同一基准名下至少两个不同分段号的视频；多个分组时取总容积最大的一组。
+
+    :param videos: ``(path, size, name)`` 列表
+    :return: 选中的分段列表；没有分段时返回 None
+    """
+    groups: Dict[str, List[tuple]] = {}
+    grouped_paths = set()
+    for item in videos:
+        stem = PurePosixPath(item[2]).stem
+        parsed = _split_part(stem)
+        if not parsed:
+            continue
+        base, _label, _number = parsed
+        key = re.sub(r"[^a-z0-9]+", "", base.lower())
+        if key:
+            groups.setdefault(key, []).append((item, parsed))
+            grouped_paths.add(item[0])
+
+    # 未参与分段的视频：如果它已经是一部完整成片，就不要把同名的若干小分段当成主资源
+    ungrouped = [
+        item for item in videos
+        if item[0] not in grouped_paths and item[1] >= MIN_PART_SIZE
+    ]
+    candidates = []
+    for entries in groups.values():
+        entries = [
+            (item, parsed) for item, parsed in entries
+            if item[1] >= MIN_PART_SIZE
+        ]
+        labels = {parsed[1] for _item, parsed in entries}
+        if len(entries) < 2 or len(labels) < 2:
+            continue
+        max_part = max(item[1] for item, _ in entries)
+        if any(item[1] >= max_part * 0.9 for item in ungrouped):
+            continue
+        candidates.append(entries)
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda entries: sum(item[1] for item, _ in entries))
+    return sorted(best, key=lambda pair: pair[1][2])
+
 
 def safe_name(value: str) -> str:
     """
@@ -139,15 +218,23 @@ def tidy_dir(client: Cd2Client, target: str, name: str,
     if video is None:
         return {"ok": False, "reason": "未找到视频文件", "files": [f[2] for f in files]}
 
-    keep_path, keep_size, keep_name = video
+    parts = _detect_parts(videos) if delete_junk_only else None
+    if parts:
+        kept_videos = [item for item, _parsed in parts]
+        main_item = max(kept_videos, key=lambda item: item[1])
+    else:
+        kept_videos = [video]
+        main_item = video
+    keep_path, keep_size, keep_name = main_item
+
     subtitles = [
         item for item in files
         if PurePosixPath(item[2]).suffix.lower() in SUBTITLE_EXT_SET
     ]
     subtitle_paths = {item[0] for item in subtitles}
     if delete_junk_only:
-        # 默认：只保留体积最大的主视频与字幕，其余视频（含推广小视频）一并删除
-        keep_paths = {keep_path} | subtitle_paths
+        # 默认：保留主视频（或全部分段）与字幕，其余视频（含推广小视频）一并删除
+        keep_paths = {item[0] for item in kept_videos} | subtitle_paths
     else:
         # 保留全部视频与字幕，只删除其余非视频文件
         keep_paths = {item[0] for item in videos} | subtitle_paths
@@ -165,29 +252,51 @@ def tidy_dir(client: Cd2Client, target: str, name: str,
         except Cd2Error as error:
             logger.warning(f"删除失败 {path}：{error}")
 
-    ext = PurePosixPath(keep_name).suffix
-    target_file_name = f"{name}{ext}"
-    renamed_file = None
-    if keep_name != target_file_name:
-        if client.rename(keep_path, target_file_name):
-            renamed_file = target_file_name
+    rename_map: List[tuple[str, str]] = []
+    renamed_files: List[str] = []
+    if parts:
+        for item, (_base, label, _number) in parts:
+            suffix = PurePosixPath(item[2]).suffix
+            target_name = f"{name}-{label}{suffix}"
+            actual = item[2]
+            if target_name != item[2]:
+                if client.rename(item[0], target_name):
+                    actual = target_name
+            renamed_files.append(actual)
+            rename_map.append((PurePosixPath(item[2]).stem, PurePosixPath(actual).stem))
+        ext = PurePosixPath(parts[0][0][2]).suffix
+        target_file_name = renamed_files[0]
+    else:
+        ext = PurePosixPath(keep_name).suffix
+        target_file_name = f"{name}{ext}"
+        actual = keep_name
+        if keep_name != target_file_name:
+            if client.rename(keep_path, target_file_name):
+                actual = target_file_name
+        renamed_files = [actual]
+        rename_map.append((PurePosixPath(keep_name).stem, PurePosixPath(actual).stem))
+    renamed_file = (
+        target_file_name
+        if actual == target_file_name and target_file_name != keep_name
+        else None
+    )
 
-    # 字幕跟随主视频改名，保留语言后缀（如 .zh.srt）
-    old_stem = PurePosixPath(keep_name).stem
+    # 字幕跟随视频改名，保留语言后缀（如 .zh.srt）
     renamed_subtitles: List[str] = []
     for path, _size, fname in subtitles:
         stem = PurePosixPath(fname).stem
         suffix = PurePosixPath(fname).suffix
-        if not stem.lower().startswith(old_stem.lower()):
-            continue
-        new_name = f"{name}{stem[len(old_stem):]}{suffix}"
-        if new_name == fname:
-            continue
-        try:
-            if client.rename(path, new_name):
-                renamed_subtitles.append(new_name)
-        except Cd2Error as error:
-            logger.warning(f"字幕改名失败 {path}：{error}")
+        for old_stem, new_stem in rename_map:
+            if not stem.lower().startswith(old_stem.lower()):
+                continue
+            new_name = f"{new_stem}{stem[len(old_stem):]}{suffix}"
+            if new_name != fname:
+                try:
+                    if client.rename(path, new_name):
+                        renamed_subtitles.append(new_name)
+                except Cd2Error as error:
+                    logger.warning(f"字幕改名失败 {path}：{error}")
+            break
 
     folder_name = target.rstrip("/").split("/")[-1]
     final_dir = target
@@ -203,16 +312,24 @@ def tidy_dir(client: Cd2Client, target: str, name: str,
             final_dir = sibling
             renamed_dir = final_dir
 
+    if parts:
+        total_size = sum(item[1] for item in kept_videos)
+        kept_text = f"{len(kept_videos)} 个分段，共 {total_size} 字节"
+    else:
+        kept_text = f"{keep_name} ({keep_size})"
+    final_files = [f"{final_dir}/{item}" for item in renamed_files]
     return {
         "ok": True,
-        "kept": f"{keep_name} ({keep_size})",
+        "kept": kept_text,
         "deleted": deleted,
         "renamed_file": renamed_file,
+        "renamed_files": renamed_files,
         "renamed_subtitles": renamed_subtitles,
         "renamed_dir": renamed_dir,
         "skipped_dir_rename": skipped_dir_rename,
         "final_dir": final_dir,
-        "final_file": f"{final_dir}/{target_file_name}",
+        "final_files": final_files,
+        "final_file": final_files[0],
         "ext": ext,
     }
 

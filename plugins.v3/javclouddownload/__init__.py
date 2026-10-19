@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.plugins import _PluginBase
@@ -46,7 +46,7 @@ class JavCloudDownload(_PluginBase):
     plugin_name = "番号云下载"
     plugin_desc = "按番号从 JavBus 取种，经 CloudDrive2 云下载到 115，完成后清理、改名并可移动到库目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.1.4"
+    plugin_version = "0.1.5"
     plugin_label = "工具"
     plugin_author = "CRY1221"
     plugin_config_prefix = "javclouddownload_"
@@ -499,6 +499,7 @@ class JavCloudDownload(_PluginBase):
             {
                 "state": STATE_ORGANIZED,
                 "final_dir": final_dir,
+                "final_files": tidied.get("final_files") or [tidied.get("final_file")],
                 "final_file": tidied.get("final_file"),
                 "message": f"已整理，删除 {len(tidied.get('deleted') or [])} 个文件",
             }
@@ -517,9 +518,15 @@ class JavCloudDownload(_PluginBase):
         moved = move_dir(client, final_dir, library)
         record["move"] = moved
         if moved.get("ok"):
+            moved_dir = moved.get("final_dir") or ""
+            moved_files = [
+                f"{moved_dir}/{PurePosixPath(item).name}"
+                for item in (record.get("final_files") or [])
+            ]
             record.update({"state": STATE_MOVED,
-                           "final_dir": moved.get("final_dir"),
-                           "final_file": f"{moved.get('final_dir')}/{name}{tidied.get('ext', '')}",
+                           "final_dir": moved_dir,
+                           "final_files": moved_files,
+                           "final_file": moved_files[0] if moved_files else "",
                            "message": "已移动到库目录"})
         else:
             message = f"整理完成但移动失败：{moved.get('reason')}"
