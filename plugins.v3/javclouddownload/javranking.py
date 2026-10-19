@@ -12,13 +12,75 @@
 
 from __future__ import annotations
 
+import html as html_lib
 import json
+import re
 import sqlite3
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
-from .source import normalize_code
+from app.sdk.logging import logger
+from app.sdk.network import RequestUtils
+
+from .source import info_hash_of, normalize_code, parse_size
+from .throttle import wait as throttle_wait
+
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+)
+MAGNET_ITEM = re.compile(
+    r'<li[^>]*class="[^"]*magnet-item[^"]*"[^>]*>([\s\S]*?)</li>', re.I
+)
+MAGNET_HREF = re.compile(
+    r'href="(magnet:\?xt=urn:btih:[^"]+)"', re.I
+)
+MAGNET_NAME = re.compile(
+    r'class="[^"]*magnet-item__name[^"]*"[^>]*title="([^"]*)"', re.I
+)
+MAGNET_SIZE = re.compile(
+    r'class="[^"]*magnet-tag--size[^"]*"[^>]*>([^<]+)<', re.I
+)
+DETAIL_TTL_HOURS = 168
+
+
+def parse_magnet_html(text: str) -> List[Dict[str, Any]]:
+    """
+    从 JavRanking 详情页 HTML 解析磁力列表。
+
+    :param text: 详情页 HTML
+    :return: 与 JavBusSource.fetch_detail 相同结构的磁力列表
+    """
+    magnets: List[Dict[str, Any]] = []
+    seen = set()
+    for block in MAGNET_ITEM.findall(text or ""):
+        href = MAGNET_HREF.search(block)
+        if not href:
+            continue
+        magnet = html_lib.unescape(href.group(1)).strip()
+        info_hash = info_hash_of(magnet)
+        if not info_hash or info_hash.lower() in seen:
+            continue
+        seen.add(info_hash.lower())
+        name = MAGNET_NAME.search(block)
+        name_text = html_lib.unescape(name.group(1)).strip() if name else ""
+        if not name_text:
+            name_text = re.sub(r"<[^>]+>", "", block).strip()[:120]
+        size_text = MAGNET_SIZE.search(block)
+        size_value = size_text.group(1).strip() if size_text else ""
+        magnets.append({
+            "name": name_text,
+            "size_text": size_value,
+            "size_bytes": parse_size(size_value),
+            "date": "",
+            "magnet": magnet,
+            "info_hash": info_hash,
+        })
+    return magnets
 
 
 class JavRankingError(RuntimeError):
@@ -124,17 +186,76 @@ class JavRankingSource:
         finally:
             conn.close()
 
-    def rankings(self, list_name: str = "main", limit: int = 50) -> List[Dict[str, Any]]:
-        """读取指定榜单的前 N 条。"""
-        allowed = {"main", "main_top250", "javlibrary_top250", "javdb_top250"}
-        if list_name not in allowed:
-            raise JavRankingError(f"未知榜单：{list_name}")
+    @staticmethod
+    def label_for(list_name: str) -> str:
+        """把榜单键转成页面显示名称。"""
+        fixed = {
+            "main": "综合榜",
+            "main_top250": "综合 Top250",
+            "javlibrary_top250": "JavLibrary Top250",
+            "javdb_top250": "JavDB Top250",
+            "javdb_uncensored_top250": "无码 Top250",
+            "javdb_fc2_top250": "FC2 Top250",
+            "dmm_weekly": "DMM 周榜",
+        }
+        if list_name in fixed:
+            return fixed[list_name]
+        match = re.match(r"javdb_top250_(\d{4})$", list_name)
+        if match:
+            return f"JAVDB {match.group(1)} Top250"
+        match = re.match(r"dmm_monthly_(\d{4})_(\d{2})$", list_name)
+        if match:
+            return f"DMM 月榜 {match.group(1)}-{match.group(2)}"
+        return list_name.replace("_", " ")
+
+    @staticmethod
+    def cover_url(video_id: Any) -> str:
+        """按 JavRanking 详情页 ID 拼封面地址。"""
+        try:
+            value = int(video_id or 0)
+        except (TypeError, ValueError):
+            return ""
+        return f"https://static.javranking.cc/video/cover/{value}.webp" if value else ""
+
+    def lists(self) -> List[Dict[str, Any]]:
+        """列出缓存中的全部榜单及条数。"""
+        order = {
+            "main": 0, "main_top250": 1, "javlibrary_top250": 2,
+            "javdb_top250": 3, "javdb_uncensored_top250": 4,
+            "javdb_fc2_top250": 5,
+        }
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "select list, count(*) from rankings group by list"
+            ).fetchall()
+        except sqlite3.Error as error:
+            raise JavRankingError(f"读取 JavRanking 榜单失败：{error}") from error
+        finally:
+            conn.close()
+        lists = [
+            {"list": row[0], "label": self.label_for(row[0]), "count": row[1]}
+            for row in rows
+        ]
+        lists.sort(key=lambda item: (
+            order.get(item["list"], 10),
+            item["list"],
+        ))
+        return lists
+
+    def rankings(self, list_name: str = "main", limit: int = 50,
+                 offset: int = 0) -> List[Dict[str, Any]]:
+        """读取指定榜单的条目。"""
         conn = self._connect()
         try:
             rows = conn.execute(
                 "select rank, code, title, date, video_id, url from rankings "
-                "where list = ? order by rank limit ?",
-                (list_name, max(1, min(int(limit or 50), 500))),
+                "where list = ? order by rank limit ? offset ?",
+                (
+                    list_name,
+                    max(1, min(int(limit or 50), 5000)),
+                    max(0, int(offset or 0)),
+                ),
             ).fetchall()
             return [
                 {
@@ -144,6 +265,7 @@ class JavRankingSource:
                     "date": row[3],
                     "video_id": row[4],
                     "detail_url": row[5],
+                    "cover": self.cover_url(row[4]),
                 }
                 for row in rows
             ]
@@ -151,6 +273,97 @@ class JavRankingSource:
             raise JavRankingError(f"读取 JavRanking 榜单失败：{error}") from error
         finally:
             conn.close()
+
+    def _save_detail(self, code: str, magnets: List[Dict[str, Any]]) -> None:
+        """把抓到的磁力写入 details 表。"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(str(self._db), timeout=10)
+        try:
+            row = conn.execute(
+                "select id, title, url from videos where code = ?", (code,)
+            ).fetchone()
+            if not row:
+                raise JavRankingError(f"JavRanking 缓存中没有番号 {code}")
+            old = conn.execute(
+                "select release_date, duration from details where code = ?", (code,)
+            ).fetchone()
+            conn.execute(
+                "insert or replace into details("
+                "code, video_id, title, release_date, duration, url, "
+                "magnets_json, fetched_at) values(?,?,?,?,?,?,?,?)",
+                (
+                    code, row[0], row[1], (old[0] if old else "") or "",
+                    (old[1] if old else "") or "", row[2],
+                    json.dumps(magnets, ensure_ascii=False), now,
+                ),
+            )
+            conn.commit()
+        except sqlite3.Error as error:
+            raise JavRankingError(f"写入 JavRanking 详情失败：{error}") from error
+        finally:
+            conn.close()
+
+    def _fetch_page(self, url: str) -> str:
+        """带 3 秒全局限速抓取 JavRanking 详情页。"""
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        http = RequestUtils(headers=headers, timeout=30, use_session=True)
+        try:
+            throttle_wait("javranking")
+            response = http.request("get", url, headers=dict(headers))
+            if response is None or response.status_code != 200:
+                status = getattr(response, "status_code", "无响应")
+                raise JavRankingError(f"请求 JavRanking 失败：{status}")
+            content = getattr(response, "content", None)
+            if isinstance(content, (bytes, bytearray)):
+                return content.decode("utf-8", "replace")
+            return response.text or ""
+        finally:
+            try:
+                http.close()
+            except Exception:
+                pass
+
+    def fetch_remote_detail(self, code: str) -> Dict[str, Any]:
+        """
+        读取详情；缓存没有磁力或已过期时按需抓取 JavRanking 详情页。
+
+        :param code: 番号
+        :return: 与 JavBusSource.fetch_detail 相同形状的字典
+        """
+        normalized = normalize_code(code)
+        cached = self.fetch_detail(normalized)
+        fetched_at = str(cached.get("details_fetched_at") or "")
+        fresh = False
+        if cached.get("magnets") and fetched_at:
+            try:
+                fresh = datetime.strptime(fetched_at, "%Y-%m-%d %H:%M:%S") > (
+                    datetime.now() - timedelta(hours=DETAIL_TTL_HOURS)
+                )
+            except ValueError:
+                fresh = False
+        if fresh:
+            return cached
+        url = str(cached.get("detail_url") or "")
+        if not url:
+            raise JavRankingError(f"JavRanking 缓存中没有 {normalized} 的详情页地址")
+        try:
+            text = self._fetch_page(url)
+            magnets = parse_magnet_html(text)
+        except Exception as error:
+            if cached.get("magnets"):
+                logger.warning(f"JavRanking 抓取失败，使用旧缓存：{error}")
+                return cached
+            raise JavRankingError(f"JavRanking 抓取失败：{error}") from error
+        if not magnets:
+            if cached.get("magnets"):
+                return cached
+            raise JavRankingError(f"JavRanking 详情页没有 {normalized} 的磁力")
+        self._save_detail(normalized, magnets)
+        return self.fetch_detail(normalized)
 
     def fetch_detail(self, code: str) -> Dict[str, Any]:
         """

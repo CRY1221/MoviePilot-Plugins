@@ -33,7 +33,7 @@ else:  # pragma: no cover - 仓库布局变化时给出明确提示
 TMP = tempfile.mkdtemp(prefix="jcd-pkg-")
 PKG = Path(TMP) / "jcd"
 PKG.mkdir()
-for name in ("__init__.py", "cd2.py", "javranking.py", "pipeline.py", "selector.py", "source.py", "pyproject.toml"):
+for name in ("__init__.py", "cd2.py", "javranking.py", "library.py", "pipeline.py", "selector.py", "source.py", "throttle.py", "pyproject.toml"):
     shutil.copy(SRC / name, PKG / name)
 
 
@@ -140,6 +140,7 @@ sys.modules.update({
 sys.path.insert(0, TMP)
 jcd = importlib.import_module("jcd")
 from jcd import cd2, pipeline, selector, source  # noqa: E402
+from jcd import library as media_library  # noqa: E402
 
 
 class _OfflineStatus:
@@ -200,8 +201,9 @@ class _FakeClient:
         self.removed: list[tuple[str, list[str], bool]] = []
         self.remove_result = True
         self.delete_result = True
+        self.moved: list[tuple[list[str], str, bool]] = []
 
-    def list_dir(self, path):
+    def list_dir(self, path, force_refresh=False):
         return self.tree.get(path, [])
 
     def find(self, path):
@@ -249,6 +251,14 @@ class _FakeClient:
     def quota(self, folder):
         return {"total": 100, "used": 0, "left": 100}
 
+    def move(self, paths, dest_parent, overwrite=True):
+        self.moved.append((list(paths), dest_parent, overwrite))
+        for path in paths:
+            name = path.rstrip("/").split("/")[-1]
+            self.dirs.discard(path)
+            self.dirs.add(f"{dest_parent.rstrip('/')}/{name}")
+        return True
+
     def close(self):
         pass
 
@@ -263,6 +273,8 @@ def _tidy_case(delete_junk_only: bool):
             _File("sample.mp4", 400 * 1024 ** 2),
             _File("main.chs.srt", 100 * 1024),
             _File("ad.txt", 1024),
+            _File("poster.jpg", 2048),
+            _File("movie.nfo", 4096),
         ]
     }
     client = _FakeClient(tree, {"/dl/old"})
@@ -274,6 +286,7 @@ client, result = _tidy_case(True)
 check("主视频模式：主视频被保留并改名", ("/dl/old/main.mp4", "ABC-123.mp4") in client.renamed, str(client.renamed))
 check("主视频模式：删除推广视频", "/dl/old/sample.mp4" in client.deleted, str(client.deleted))
 check("主视频模式：删除广告文件", "/dl/old/ad.txt" in client.deleted, str(client.deleted))
+check("主视频模式：删除图片和 nfo", "/dl/old/poster.jpg" in client.deleted and "/dl/old/movie.nfo" in client.deleted, str(client.deleted))
 check("主视频模式：保留字幕", all("srt" not in path for path in client.deleted), str(client.deleted))
 check("主视频模式：目录改名", result.get("final_dir") == "/dl/ABC-123", str(result))
 
@@ -466,6 +479,310 @@ def _candidate_record(obj, candidates, index=0):
     return rec
 
 
+_mp_db = Path(TMP) / "mp-user.db"
+_mp_con = sqlite3.connect(_mp_db)
+_mp_con.execute(
+    "create table mediaserveritem(server text, library text, item_id text, "
+    "title text, original_title text, path text)"
+)
+_mp_con.execute(
+    "insert into mediaserveritem values(?,?,?,?,?,?)",
+    ("emby", "3", "117", "SNIS-110 标题", "",
+     "/mnt/strm/adult/女优/SNIS-110/SNIS-110.strm"),
+)
+_mp_con.execute(
+    "insert into mediaserveritem values(?,?,?,?,?,?)",
+    ("emby", "3", "118", "SNIS-1100 标题", "",
+     "/mnt/strm/adult/女优/SNIS-1100/SNIS-1100.strm"),
+)
+_mp_con.commit()
+_mp_con.close()
+_mp_rows = media_library.EmbyLibrary("成人影片")._mp_rows("SNIS-110", db_path=_mp_db)
+check("MP 索引：命中 SNIS-110 且不误匹配 SNIS-1100",
+      len(_mp_rows) == 1 and _mp_rows[0]["item_id"] == "117",
+      str(_mp_rows))
+
+check("JavRanking 榜单名：年份榜",
+      jcd.JavRankingSource.label_for("javdb_top250_2024") == "JAVDB 2024 Top250")
+check("JavRanking 榜单名：DMM 月榜",
+      jcd.JavRankingSource.label_for("dmm_monthly_2025_11") == "DMM 月榜 2025-11")
+check("JavRanking 封面：按 video_id 拼接",
+      jcd.JavRankingSource.cover_url(123)
+      == "https://static.javranking.cc/video/cover/123.webp")
+
+# ---------- Emby 库基线 / 洗版 ----------
+
+base_candidate = _candidate("ABC-123 FHD", "a")
+q_4k_candidate = {
+    "name": "ABC-123 2160P",
+    "magnet": "magnet:?xt=urn:btih:" + "e" * 40,
+    "info_hash": "e" * 40,
+    "size_bytes": 6 * GB,
+    "size_text": "6GB",
+}
+
+q_4k = media_library.estimate_candidate_quality("ABC-123 2160P", 6 * GB)
+q_fake_4k = media_library.estimate_candidate_quality("ABC-123 2160P", 4 * GB)
+q_2k = media_library.estimate_candidate_quality("ABC-123 1440P", 4 * GB)
+q_1080 = media_library.estimate_candidate_quality("ABC-123 FHD", 5 * GB)
+check("候选估算：2160P 达 5GB 算 2160", q_4k["height"] == 2160, str(q_4k))
+check("候选估算：2160P 不足 5GB 不算 2160", q_fake_4k["height"] != 2160, str(q_fake_4k))
+check("候选估算：1440P 算 1440", q_2k["height"] == 1440, str(q_2k))
+check("候选估算：6K 是码率标签，不算分辨率",
+      media_library.estimate_candidate_quality(
+          "IPX-899_6K-C 高清", 5723043921)["height"] == 0)
+check("候选估算：6K 读出 6Mbps",
+      media_library.estimate_candidate_quality(
+          "IPX-899_6K-C 高清", 5723043921)["bitrate"] == 6_000_000)
+check("洗版判断：6000kbps 对 5746kbps 不算升级",
+      media_library.candidate_may_be_better(
+          {"height": 1080, "bitrate": 5746007, "size": 5345542264},
+          media_library.estimate_candidate_quality("IPX-899_6K-C 高清", 5723043921),
+      ) is False)
+_q8k = media_library.estimate_candidate_quality("X 8K", 6 * GB)
+check("洗版判断：8000kbps 对 5746kbps 可洗",
+      media_library.candidate_may_be_better(
+          {"height": 1080, "bitrate": 5746007, "size": 5345542264},
+          _q8k,
+      ) is True, str(_q8k))
+check("候选估算：2K 是码率标签，不算 1440",
+      media_library.estimate_candidate_quality(
+          "IPX-899_2K-C 字幕", 1986422374)["height"] == 0)
+check("候选估算：裸 4K 是码率标签，不算 2160",
+      media_library.estimate_candidate_quality("X 4K", 6 * GB)["height"] == 0)
+check("候选估算：FHD 算 1080", q_1080["height"] == 1080, str(q_1080))
+
+existing_1080 = {"height": 1080, "size": 5 * GB, "bitrate": 8_000_000,
+                 "has_chinese_sub": False}
+check("洗版判断：4K 高于 1080",
+      media_library.candidate_may_be_better(existing_1080, q_4k) is True)
+check("洗版判断：同 1080 只大 1.2 倍不洗",
+      media_library.candidate_may_be_better(
+          existing_1080,
+          media_library.estimate_candidate_quality("ABC-123 FHD", int(6 * GB)),
+      ) is False)
+check("洗版判断：同 1080 大 1.5 倍可洗",
+      media_library.candidate_may_be_better(
+          existing_1080,
+          media_library.estimate_candidate_quality("ABC-123 FHD", int(8 * GB)),
+      ) is True)
+check("中字标记：-C 保留判断",
+      selector.has_chinese_sub("IPX-899_6K-C") is True)
+
+check("分辨率标签：1080",
+      media_library.resolution_label(1080) == "1080P")
+check("分辨率标签：2160",
+      media_library.resolution_label(2160) == "2160P")
+check("分辨率标签：未知高度不写",
+      media_library.resolution_label(0) == "")
+
+check("真实复核：2160 高于 1080",
+      media_library.actual_is_better(existing_1080, {"height": 2160, "size": 6 * GB}) is True)
+check("真实复核：1080 不高于 1080",
+      media_library.actual_is_better(existing_1080, {"height": 1080, "size": 5 * GB}) is False)
+
+hit = media_library.LibraryHit(
+    server="emby", item_id="item-1", path="/lib/adult/ABC-123/ABC-123.mp4",
+    quality=existing_1080,
+)
+skip_obj = _retry_instance()
+skip_obj._find_library_item = lambda code: hit
+skip_obj._enable_upgrade = False
+skip_obj.preview = lambda code: (_ for _ in ()).throw(AssertionError("不应搜索"))
+skip_result = skip_obj._submit_one("ABC-123", 0)
+check("库内有且未开洗版：直接跳过",
+      skip_result.get("skipped") is True
+      and skip_obj._tasks["ABC-123"].get("state") == jcd.STATE_SKIPPED,
+      str(skip_result))
+
+upgrade_obj = _retry_instance()
+upgrade_obj._find_library_item = lambda code: hit
+upgrade_obj._enable_upgrade = True
+upgrade_obj.preview = lambda code: {
+    "code": code, "tier": "中文字幕", "chosen": base_candidate,
+    "candidates": [base_candidate],
+}
+upgrade_skip = upgrade_obj._submit_one("ABC-123", 0, upgrade=True)
+check("开洗版但候选不够好：跳过",
+      upgrade_skip.get("skipped") is True,
+      str(upgrade_skip))
+
+upgrade_client = _FakeClient({}, set())
+upgrade_download = _retry_instance()
+upgrade_download._find_library_item = lambda code: hit
+upgrade_download._enable_upgrade = True
+upgrade_download.preview = lambda code: {
+    "code": code, "tier": "4K", "chosen": q_4k_candidate,
+    "candidates": [q_4k_candidate],
+}
+upgrade_download._client = lambda: upgrade_client
+upgrade_result = upgrade_download._submit_one("ABC-123", 0, upgrade=True)
+check("开洗版且候选更好：提交下载",
+      upgrade_result.get("ok") is True
+      and upgrade_client.added == [(q_4k_candidate["magnet"], "/dl")],
+      str(upgrade_result))
+
+exist_client = _FakeClient(
+    {"/dl/ABC-123": [_File("ABC-123.mp4", 6 * GB)]},
+    {"/dl/ABC-123"},
+)
+exist_obj = _retry_instance()
+exist_obj._find_library_item = lambda code: None
+exist_obj._move_enabled = True
+exist_obj._library_dir = "/lib"
+exist_obj._delete_junk_only = True
+exist_obj._enable_filter_rules = False
+exist_obj._client = lambda: exist_client
+exist_obj.preview = lambda code: {
+    "code": code, "tier": "中文字幕", "chosen": base_candidate,
+    "candidates": [base_candidate],
+}
+exist_result = exist_obj._submit_one("ABC-123", 0)
+check("重复提交已有成片：继续整理并移动",
+      exist_result.get("moved") is True
+      and exist_obj._tasks["ABC-123"].get("state") == jcd.STATE_MOVED
+      and exist_client.moved[-1][0] == ["/dl/ABC-123"],
+      str(exist_result) + " " + str(exist_client.moved))
+
+multi_replace = _FakeClient(
+    {
+        "/lib/加美": [_File("ipx-899.mp4", 5 * GB), _File("ipx-422.mp4", 8 * GB)],
+        "/dl/IPX-899": [_File("IPX-899.mp4", 6 * GB)],
+    },
+    {"/lib/加美", "/dl/IPX-899"},
+)
+multi_result = pipeline.replace_existing_files(
+    multi_replace, "/dl/IPX-899", "/lib/加美",
+    ["/dl/IPX-899/IPX-899.mp4"], old_name="ipx-899.mp4", code="IPX-899",
+)
+check("洗版替换：目录有多个视频时只删目标视频",
+      multi_result.get("ok") is True
+      and multi_replace.deleted == ["/lib/加美/ipx-899.mp4"]
+      and multi_replace.moved[-1][:2] == (["/dl/IPX-899/ipx-899.mp4"], "/lib/加美"),
+      str(multi_result) + " " + str(multi_replace.deleted) + " " + str(multi_replace.moved))
+
+missing_replace = _FakeClient(
+    {"/lib/加美": [_File("ipx-422.mp4", 8 * GB)]},
+    {"/lib/加美", "/dl/IPX-899"},
+)
+missing_result = pipeline.replace_existing_files(
+    missing_replace, "/dl/IPX-899", "/lib/加美",
+    ["/dl/IPX-899/IPX-899.mp4"], old_name="ipx-899.mp4", code="IPX-899",
+)
+check("洗版替换：找不到旧视频时不删除任何内容",
+      missing_result.get("ok") is False and missing_replace.deleted == [],
+      str(missing_result))
+
+single_client = _FakeClient(
+    {
+        "/lib/ABC-123": [_File("ABC-123.mp4", 5 * GB)],
+        "/dl/ABC-123": [_File("ABC-123.mp4", 6 * GB)],
+    },
+    {"/lib/ABC-123", "/dl/ABC-123"},
+)
+single_result = pipeline.replace_existing_files(
+    single_client, "/dl/ABC-123", "/lib/ABC-123",
+    ["/dl/ABC-123/ABC-123.mp4"], old_name="ABC-123.mp4", code="ABC-123",
+)
+check("洗版替换：目录只有一个视频时替换整个目录",
+      single_result.get("ok") is True
+      and "/lib/ABC-123" in single_client.deleted
+      and single_client.moved[-1][:2] == (["/dl/ABC-123"], "/lib"),
+      str(single_result) + " " + str(single_client.moved))
+
+stale_client = _FakeClient(
+    {"/dl": [_File("ABC-123", is_dir=True)]}, set()
+)
+check("落盘目录：find 缓存未命中时返回空",
+      pipeline.locate_download_dir(stale_client, "/dl", "ABC-123") is None)
+check("落盘目录：强制刷新后能找到",
+      pipeline.locate_download_dir(
+          stale_client, "/dl", "ABC-123", force_refresh=True
+      ) == "/dl/ABC-123")
+
+empty_client = _FakeClient(
+    {"/dl/ABC-123": [
+        _File("main.mp4", 5 * GB),
+        _File("2048", 0, True),
+        _File("宣傳文件", 0, True),
+    ]},
+    {"/dl/ABC-123"},
+)
+empty_removed = pipeline.remove_empty_dirs(empty_client, "/dl/ABC-123")
+check("整理后清理空目录",
+      set(empty_removed) == {"/dl/ABC-123/2048", "/dl/ABC-123/宣傳文件"},
+      str(empty_removed))
+
+# ---------- 移动与替换 ----------
+
+class _RootLibrary:
+    def __init__(self, library_id, name, path=""):
+        self.id = library_id
+        self.name = name
+        self.path = path
+
+
+class _RootInstance:
+    def get_librarys(self):
+        return [_RootLibrary("3", "成人影片", "")]
+
+    def get_data(self, url):
+        assert "VirtualFolders" in url, url
+        class _Response:
+            @staticmethod
+            def json():
+                return [{"ItemId": "3", "Locations": ["/mnt/strm/adult"]}]
+        return _Response()
+
+
+check("目录映射：解析 Emby:CD2",
+      media_library._parse_path_map("/mnt/strm/adult:/cd2/adult")
+      == [("/mnt/strm/adult", "/cd2/adult")])
+
+_map_lib = media_library.EmbyLibrary("成人影片", "/mnt/strm/adult:/cd2/adult")
+check("目录映射：旧文件路径换算为 CD2 目录",
+      _map_lib._mapped_dir("/mnt/strm/adult/女优/ABC-123/ABC-123.strm")
+      == "/cd2/adult/女优/ABC-123")
+
+check("Emby 库根：get_librarys 无路径时回退 VirtualFolders",
+      media_library.EmbyLibrary._library_roots(_RootInstance())
+      == {"3": "/mnt/strm/adult"})
+
+check("Emby 相对目录：按库根换算子目录",
+      media_library.EmbyLibrary._relative_dir(
+          "/mnt/strm/adult/女优/ABC-123/ABC-123.strm", "/mnt/strm/adult"
+      ) == "女优/ABC-123")
+
+nested_client = _FakeClient({}, {"/dl/ABC-123", "/lib/女优/ABC-123"})
+nested_result = pipeline.move_dir(
+    nested_client, "/dl/ABC-123", "/lib",
+    replace=True, dest_dir="/lib/女优/ABC-123",
+)
+check("原位替换：删除旧子目录并移回原父目录",
+      nested_result.get("ok") is True
+      and "/lib/女优/ABC-123" in nested_client.deleted
+      and nested_client.moved[-1][:2] == (["/dl/ABC-123"], "/lib/女优"),
+      str(nested_result) + " " + str(nested_client.moved))
+
+move_client = _FakeClient({}, {"/dl/ABC-123", "/lib/ABC-123"})
+move_result = pipeline.move_dir(move_client, "/dl/ABC-123", "/lib", replace=True)
+check("替换移动：先删旧目录",
+      "/lib/ABC-123" in move_client.deleted,
+      str(move_client.deleted))
+check("替换移动：再移动新目录",
+      move_result.get("ok") is True
+      and move_client.moved
+      and move_client.moved[-1][0] == ["/dl/ABC-123"],
+      str(move_result))
+
+no_replace_client = _FakeClient({}, {"/dl/ABC-123", "/lib/ABC-123"})
+no_replace = pipeline.move_dir(no_replace_client, "/dl/ABC-123", "/lib", replace=False)
+check("不替换时目标存在：跳过",
+      no_replace.get("ok") is False
+      and no_replace_client.deleted == [],
+      str(no_replace))
+
+
 retry = _retry_instance()
 cands = [
     _candidate("c0", "a"),
@@ -597,18 +914,18 @@ def _magnet(name, gb):
     return {"name": name, "size_text": f"{gb}GB", "size_bytes": int(gb * GB),
             "date": "", "magnet": "magnet:?xt=urn:btih:" + "d" * 40, "info_hash": "d" * 40}
 
-check("4K 门槛：4GB 不算 4K", selector.is_uhd("X 4K", 4 * GB) is False)
-check("4K 门槛：5GB 算 4K", selector.is_uhd("X 4K", 5 * GB) is True)
+check("2160P 门槛：4GB 不算 2160P", selector.is_uhd("X 2160P", 4 * GB) is False)
+check("2160P 门槛：5GB 算 2160P", selector.is_uhd("X 2160P", 5 * GB) is True)
 
-picked = selector.select([_magnet("X 4K 4GB", 4), _magnet("X-C 1080p", 6)])
+picked = selector.select([_magnet("X 2160P 4GB", 4), _magnet("X-C 1080p", 6)])
 check("假4K被排除", (picked.get("chosen") or {}).get("name") == "X-C 1080p", str(picked))
 check("假4K记录原因", any(x.get("reason", "").startswith("假4K") for x in picked.get("excluded", [])), str(picked.get("excluded")))
 
-picked = selector.select([_magnet("X 4K 6GB", 6), _magnet("X-C 5GB", 5)])
-check("中字优先于4K", (picked.get("chosen") or {}).get("name") == "X-C 5GB", str(picked))
+picked = selector.select([_magnet("X 2160P 6GB", 6), _magnet("X-C 5GB", 5)])
+check("中字优先于2160P", (picked.get("chosen") or {}).get("name") == "X-C 5GB", str(picked))
 
-picked = selector.select([_magnet("X 4K 6GB", 6), _magnet("X 10GB", 10)])
-check("4K优先于普通大体积", (picked.get("chosen") or {}).get("name") == "X 4K 6GB", str(picked))
+picked = selector.select([_magnet("X 2160P 6GB", 6), _magnet("X 10GB", 10)])
+check("2160P优先于普通大体积", (picked.get("chosen") or {}).get("name") == "X 2160P 6GB", str(picked))
 
 picked = selector.select([_magnet("X 720P 10GB", 10), _magnet("X 5GB", 5)])
 check("720P被排除", (picked.get("chosen") or {}).get("name") == "X 5GB", str(picked))
@@ -687,8 +1004,12 @@ try:
 except jcd.JavRankingError:
     check("缓存：未知番号报错", True)
 
+_orig_remote = jcd.JavRankingSource.fetch_remote_detail
+jcd.JavRankingSource.fetch_remote_detail = lambda self, code: self.fetch_detail(code)
+
 inst3 = jcd.JavCloudDownload()
-inst3._source_mode = "javranking"
+inst3._use_javbus = False
+inst3._use_javranking = True
 inst3._javranking_dir = str(CACHE)
 inst3._allow_uncensored = False
 inst3._allow_junk = False
@@ -699,15 +1020,53 @@ check("数据源：排除 UC 后选中 -C", (preview.get("chosen") or {}).get("n
 try:
     inst3.preview("ABF-394")
     check("数据源：javranking 无磁力报错", False)
-except jcd.JavRankingError:
+except (jcd.JavRankingError, jcd.JavBusError):
     check("数据源：javranking 无磁力报错", True)
 
 inst4 = jcd.JavCloudDownload()
-inst4._source_mode = "auto"
+inst4._use_javbus = False
+inst4._use_javranking = True
 inst4._javranking_dir = str(CACHE)
 inst4._allow_uncensored = False
 inst4._allow_junk = False
 check("数据源：auto 命中缓存", inst4._fetch_detail("START-257").get("source") == "javranking")
+
+_orig_javbus_detail = jcd.source.JavBusSource.fetch_detail
+def fake_both_detail(self, code):
+    return {
+        "code": code, "title": "合并标题", "release_date": "", "duration": "",
+        "detail_url": "", "magnets": [
+            {"name": "START-257-C.torrent", "size_text": "5.82GB",
+             "size_bytes": 6249177415, "date": "",
+             "magnet": "magnet:?xt=urn:btih:" + "b" * 40, "info_hash": "b" * 40},
+            {"name": "START-257-1080P", "size_text": "6GB",
+             "size_bytes": 6442450944, "date": "",
+             "magnet": "magnet:?xt=urn:btih:" + "c" * 40, "info_hash": "c" * 40},
+        ],
+    }
+jcd.source.JavBusSource.fetch_detail = fake_both_detail
+inst5 = jcd.JavCloudDownload()
+inst5._use_javbus = True
+inst5._use_javranking = True
+inst5._javranking_dir = str(CACHE)
+inst5._allow_uncensored = False
+inst5._allow_junk = False
+merged = inst5._fetch_detail("START-257")
+check("数据源：两个来源合并并按 infoHash 去重",
+      merged.get("source") == "javranking+javbus"
+      and len(merged.get("magnets") or []) == 3,
+      str(merged.get("source")) + " " + str(len(merged.get("magnets") or [])))
+jcd.source.JavBusSource.fetch_detail = _orig_javbus_detail
+
+_parsed = jcd.javranking.parse_magnet_html(
+    '<li class="magnet-item"><a href="magnet:?xt=urn:btih:'
+    + "d" * 40 + '&amp;dn=X" title="X-C 4.59GB">X-C 4.59GB</a>'
+    '<span class="magnet-tag magnet-tag--size">4.59GB</span></li>'
+)
+check("JavRanking：解析磁力块",
+      len(_parsed) == 1 and _parsed[0]["info_hash"] == "d" * 40
+      and _parsed[0]["size_bytes"] > 0,
+      str(_parsed))
 
 original = jcd.source.JavBusSource.fetch_detail
 def fake_fetch(self, code):
@@ -718,6 +1077,7 @@ def fake_fetch(self, code):
                                        "info_hash": "c" * 40}],
     }
 jcd.source.JavBusSource.fetch_detail = fake_fetch
+inst4._use_javbus = True
 try:
     fallback = inst4._fetch_detail("ABF-394")
     check("数据源：auto 无磁力回退 JavBus", fallback.get("source") == "javbus", str(fallback))
