@@ -19,6 +19,7 @@ import sqlite3
 import sys
 import tempfile
 import types
+from datetime import datetime, timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
@@ -49,6 +50,7 @@ class _PluginBase:
     def __init__(self) -> None:
         self._store = {}
         self._data_path = Path(tempfile.mkdtemp(prefix="mp-data-"))
+        self.messages = []
 
     def get_data(self, key=None, plugin_id=None):
         return self._store.get(key)
@@ -58,6 +60,9 @@ class _PluginBase:
 
     def get_data_path(self, plugin_id=None):
         return self._data_path
+
+    def post_message(self, **kwargs):
+        self.messages.append(kwargs)
 
 
 plugins._PluginBase = _PluginBase
@@ -97,6 +102,17 @@ class RequestUtils:
 
 network_mod.RequestUtils = RequestUtils
 
+schemas_mod = types.ModuleType("app.schemas")
+schemas_mod.__path__ = []
+types_mod = types.ModuleType("app.schemas.types")
+
+
+class MessageType:
+    Plugin = "插件"
+
+
+types_mod.MessageType = MessageType
+
 grpc = types.ModuleType("grpc")
 
 
@@ -117,11 +133,34 @@ sys.modules.update({
     "app.sdk": sdk,
     "app.sdk.logging": logging_mod,
     "app.sdk.network": network_mod,
+    "app.schemas": schemas_mod,
+    "app.schemas.types": types_mod,
     "grpc": grpc,
 })
 sys.path.insert(0, TMP)
 jcd = importlib.import_module("jcd")
-from jcd import pipeline, selector, source  # noqa: E402
+from jcd import cd2, pipeline, selector, source  # noqa: E402
+
+
+class _OfflineStatus:
+    NAMES = {
+        0: "OFFLINE_INIT",
+        1: "OFFLINE_DOWNLOADING",
+        2: "OFFLINE_FINISHED",
+        3: "OFFLINE_ERROR",
+    }
+
+    @classmethod
+    def Name(cls, value):
+        return cls.NAMES.get(int(value), "OFFLINE_UNKNOWN")
+
+
+class _FakePB:
+    OfflineFileStatus = _OfflineStatus
+
+
+cd2.pb = _FakePB
+cd2.pb_grpc = object()
 
 FAILURES: list[str] = []
 
@@ -141,12 +180,25 @@ class _File:
         self.isDirectory = is_dir
 
 
+class _FakeOfflineTask:
+    def __init__(self, name: str, info_hash: str, status: int = 0,
+                 percent: float = 0) -> None:
+        self.name = name
+        self.infoHash = info_hash
+        self.status = status
+        self.percendDone = percent
+
+
 class _FakeClient:
-    def __init__(self, tree, dirs) -> None:
+    def __init__(self, tree, dirs, offline=None) -> None:
         self.tree = tree
         self.dirs = set(dirs)
         self.deleted: list[str] = []
         self.renamed: list[tuple[str, str]] = []
+        self.offline = list(offline or [])
+        self.added: list[tuple[str, str]] = []
+        self.removed: list[tuple[str, list[str], bool]] = []
+        self.remove_result = True
 
     def list_dir(self, path):
         return self.tree.get(path, [])
@@ -163,7 +215,30 @@ class _FakeClient:
         return True
 
     def find_offline(self, folder, info_hash="", name=""):
+        target = (info_hash or "").lower()
+        for task in self.offline:
+            if target and (task.infoHash or "").lower() == target:
+                return task
+            if name and task.name == name:
+                return task
         return None
+
+    def list_offline(self, folder):
+        return list(self.offline)
+
+    def add_offline(self, url, folder):
+        self.added.append((url, folder))
+        return "submitted"
+
+    def remove_offline(self, folder, info_hashes, delete_files=False):
+        self.removed.append((folder, list(info_hashes), delete_files))
+        return self.remove_result
+
+    def quota(self, folder):
+        return {"total": 100, "used": 0, "left": 100}
+
+    def close(self):
+        pass
 
 
 GB = 1024 ** 3
@@ -338,6 +413,169 @@ check("已完成任务不受 max_wait 影响", inst2._wait_exceeded(finished) is
 limited = {"code": "ABC-123", "organize_attempts": jcd.MAX_ORGANIZE_ATTEMPTS + 1}
 gave_up = inst2._organize_give_up(limited, "未找到落盘目录")
 check("整理超过上限停止重试", gave_up and limited.get("state") == "failed", str(limited))
+
+
+# ---------- 候选超时换种 ----------
+
+OLD = (datetime.now() - timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _candidate(name, char):
+    return {
+        "name": name,
+        "magnet": "magnet:?xt=urn:btih:" + char * 40,
+        "info_hash": char * 40,
+        "size_bytes": 1024 ** 3,
+        "size_text": "1GB",
+    }
+
+
+def _retry_instance():
+    obj = jcd.JavCloudDownload()
+    obj._download_dir = "/dl"
+    obj._max_candidates = 3
+    obj._candidate_timeout_minutes = 5
+    obj._candidate_queue_timeout_minutes = 10
+    return obj
+
+
+def _candidate_record(obj, candidates, index=0):
+    rec = obj._new_record("ABC-123", "ABC-123")
+    rec.update({
+        "candidates": candidates,
+        "candidate_index": index,
+        "state": jcd.STATE_DOWNLOADING,
+        "candidate_started_at": OLD,
+        "submitted_at": OLD,
+        "info_hash": candidates[index]["info_hash"],
+        "magnet_name": candidates[index]["name"],
+    })
+    return rec
+
+
+retry = _retry_instance()
+cands = [
+    _candidate("c0", "a"),
+    {"name": "c0-dup", "magnet": "magnet:?xt=urn:btih:" + "a" * 40,
+     "info_hash": "a" * 40, "size_bytes": 0, "size_text": ""},
+    _candidate("c1", "b"),
+    _candidate("c2", "c"),
+    _candidate("c3", "d"),
+]
+prepared = retry._prepare_candidates({"chosen": cands[0], "candidates": cands})
+check("候选按 info_hash 去重", len(prepared) == 3, str(prepared))
+check("候选最多保留 3 条", [c["name"] for c in prepared] == ["c0", "c1", "c2"], str(prepared))
+
+submit_client = _FakeClient({}, set())
+submit_obj = _retry_instance()
+submit_obj.preview = lambda code: {
+    "code": code,
+    "tier": "中文字幕",
+    "chosen": cands[0],
+    "candidates": cands,
+}
+submit_obj._client = lambda: submit_client
+submitted = submit_obj._submit_one("ABC-123", 0)
+submitted_record = submit_obj._tasks["ABC-123"]
+check("提交成功并保存候选", submitted.get("ok") and len(submitted_record["candidates"]) == 3,
+      str(submitted_record))
+check("只提交第一条候选", submit_client.added == [(cands[0]["magnet"], "/dl")],
+      str(submit_client.added))
+check("提交后 candidate_index=0", submitted_record.get("candidate_index") == 0,
+      str(submitted_record))
+
+timeout_client = _FakeClient(
+    {}, set(), offline=[_FakeOfflineTask("c0", "a" * 40, status=1, percent=42)]
+)
+timeout_obj = _retry_instance()
+timeout_record = _candidate_record(timeout_obj, prepared)
+timeout_obj._advance_record(
+    timeout_client, timeout_record,
+    offline_index=timeout_obj._offline_index(timeout_client.offline),
+)
+check("超时删除任务和文件",
+      timeout_client.removed == [("/dl", ["a" * 40], True)],
+      str(timeout_client.removed))
+check("超时后换下一条候选",
+      timeout_record.get("candidate_index") == 1
+      and timeout_client.added[-1][0] == prepared[1]["magnet"],
+      str(timeout_record))
+check("超时写入尝试记录",
+      (timeout_record.get("candidate_attempts") or [{}])[0].get("result") == "timeout",
+      str(timeout_record.get("candidate_attempts")))
+
+finish_client = _FakeClient(
+    {}, set(), offline=[_FakeOfflineTask("c0", "a" * 40, status=2, percent=100)]
+)
+finish_obj = _retry_instance()
+finish_record = _candidate_record(finish_obj, prepared[:1])
+organize_calls = []
+finish_obj._organize = lambda client, record, wait=0: organize_calls.append(True)
+finish_obj._advance_record(
+    finish_client, finish_record,
+    offline_index=finish_obj._offline_index(finish_client.offline),
+)
+check("完成进入整理", finish_record.get("state") == jcd.STATE_FINISHED and organize_calls,
+      str(finish_record))
+check("完成只发一次通知", len(finish_obj.messages) == 1
+      and "完成" in finish_obj.messages[0].get("title", ""), str(finish_obj.messages))
+
+exhaust_client = _FakeClient(
+    {}, set(), offline=[_FakeOfflineTask("c2", "c" * 40, status=1, percent=30)]
+)
+exhaust_obj = _retry_instance()
+exhaust_record = _candidate_record(exhaust_obj, prepared, index=2)
+exhaust_obj._advance_record(
+    exhaust_client, exhaust_record,
+    offline_index=exhaust_obj._offline_index(exhaust_client.offline),
+)
+check("3 条候选耗尽后失败", exhaust_record.get("state") == jcd.STATE_FAILED,
+      str(exhaust_record))
+check("耗尽后不再提交", exhaust_client.added == [], str(exhaust_client.added))
+check("耗尽后发失败通知", len(exhaust_obj.messages) == 1
+      and "失败" in exhaust_obj.messages[0].get("title", ""), str(exhaust_obj.messages))
+
+remove_client = _FakeClient(
+    {}, set(), offline=[_FakeOfflineTask("c0", "a" * 40, status=1, percent=10)]
+)
+remove_client.remove_result = False
+remove_obj = _retry_instance()
+remove_record = _candidate_record(remove_obj, prepared)
+remove_obj._advance_record(
+    remove_client, remove_record,
+    offline_index=remove_obj._offline_index(remove_client.offline),
+)
+check("删除失败时不换种",
+      remove_record.get("candidate_index") == 0 and remove_client.added == [],
+      str(remove_record))
+remove_record["remove_attempts"] = jcd.MAX_REMOVE_ATTEMPTS - 1
+remove_obj._advance_record(
+    remove_client, remove_record,
+    offline_index=remove_obj._offline_index(remove_client.offline),
+)
+check("删除连续失败后终止", remove_record.get("state") == jcd.STATE_FAILED,
+      str(remove_record))
+
+queue_client = _FakeClient(
+    {}, set(), offline=[_FakeOfflineTask("c0", "a" * 40, status=0, percent=0)]
+)
+queue_obj = _retry_instance()
+queue_record = _candidate_record(queue_obj, prepared)
+queue_record["state"] = jcd.STATE_SUBMITTED
+queue_record["candidate_started_at"] = ""
+queue_obj._advance_record(
+    queue_client, queue_record,
+    offline_index=queue_obj._offline_index(queue_client.offline),
+)
+check("排队超时也换种",
+      queue_record.get("candidate_index") == 1
+      and queue_client.removed[0][2] is True,
+      str(queue_record))
+
+service_obj = _retry_instance()
+service_obj._enabled = True
+service = service_obj.get_service()[0]
+check("定时服务使用秒级间隔", service.get("kwargs") == {"seconds": 10}, str(service))
 
 
 # ---------- 选种规则：4K 门槛、中字优先、720P ----------
