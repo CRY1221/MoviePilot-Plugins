@@ -56,7 +56,7 @@ class JavCloudDownload(_PluginBase):
     plugin_name = "番号云下载"
     plugin_desc = "按番号从 JavBus 取种，经 CloudDrive2 云下载到 115，完成后清理、改名并可移动到库目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.2.0"
+    plugin_version = "0.2.4"
     plugin_label = "工具"
     plugin_author = "CRY1221"
     plugin_config_prefix = "javclouddownload_"
@@ -154,8 +154,8 @@ class JavCloudDownload(_PluginBase):
         if not self._cd2_host:
             self._status = "配置不完整：缺少 CloudDrive2 地址，请在设置中填写"
             return
-        if not self._cd2_token and not self._cd2_username:
-            self._status = "配置不完整：需要 API 令牌或账号密码"
+        if not self._cd2_token and not (self._cd2_username and self._cd2_password):
+            self._status = "配置不完整：需要 API 令牌，或同时填写 CD2 账号和密码"
             return
         if not self._download_dir:
             self._status = "配置不完整：缺少云下载目录，请在设置中填写"
@@ -714,12 +714,11 @@ class JavCloudDownload(_PluginBase):
         self._organize(client, record, wait_seconds)
 
     def _switch_candidate(self, client: Cd2Client, record: Dict[str, Any],
-                          reason: str, result: str = "timeout",
-                          task: Optional[Any] = None) -> None:
+                          reason: str, result: str = "timeout") -> None:
         """
-        删除当前候选的离线任务，然后提交下一条候选。
+        删除当前候选已下载的文件，然后提交下一条候选。
 
-        删除失败时不提交下一条，避免两个任务同时下载。
+        按产品要求只清理文件，不删除 115 离线任务记录。
 
         :param client: CD2 客户端
         :param record: 任务记录
@@ -728,26 +727,40 @@ class JavCloudDownload(_PluginBase):
         :param task: 当前离线任务；None 表示列表中还没出现
         """
         folder = record.get("folder") or self._download_dir
-        info_hash = record.get("info_hash") or ""
-        if task is not None and info_hash:
+        target = locate_download_dir(
+            client,
+            folder,
+            record.get("name") or record.get("code") or "",
+            record.get("task_name") or "",
+        )
+        if target is not None:
             try:
-                removed = client.remove_offline(
-                    folder, [info_hash], delete_files=True
-                )
-                error_text = "" if removed else "删除接口返回失败"
+                removed = client.delete(target)
+                error_text = "" if removed else "删除文件接口返回失败"
             except Exception as error:
                 removed = False
                 error_text = f"{type(error).__name__}: {error}"
+            if removed:
+                # 删除后回查，确认目录确实消失
+                try:
+                    remaining = client.find(target)
+                except Exception as error:
+                    removed = False
+                    error_text = f"删除后无法确认：{type(error).__name__}: {error}"
+                else:
+                    if remaining is not None:
+                        removed = False
+                        error_text = "删除接口返回成功，但目录仍存在"
             if not removed:
                 attempts = int(record.get("remove_attempts") or 0) + 1
                 record["remove_attempts"] = attempts
                 record["message"] = (
-                    f"删除旧离线任务失败，重试 {attempts}/{MAX_REMOVE_ATTEMPTS}"
+                    f"删除已下载文件失败，重试 {attempts}/{MAX_REMOVE_ATTEMPTS}"
                 )
                 if attempts >= MAX_REMOVE_ATTEMPTS:
                     self._fail(
                         record,
-                        f"删除旧离线任务失败：{error_text or '未知错误'}",
+                        f"删除已下载文件失败：{error_text or '未知错误'}",
                     )
                 else:
                     self._stamp(record)
@@ -795,7 +808,6 @@ class JavCloudDownload(_PluginBase):
                 self._switch_candidate(
                     client, record,
                     f"任务启动超过 {self._candidate_queue_timeout_minutes} 分钟",
-                    task=None,
                 )
             else:
                 record.update({"state": STATE_SUBMITTED,
@@ -818,7 +830,7 @@ class JavCloudDownload(_PluginBase):
             return
 
         if state == "OFFLINE_ERROR":
-            self._switch_candidate(client, record, "离线任务失败", result="error", task=task)
+            self._switch_candidate(client, record, "离线任务失败", result="error")
             return
 
         if state == "OFFLINE_DOWNLOADING":
@@ -832,7 +844,6 @@ class JavCloudDownload(_PluginBase):
                     client, record,
                     f"下载超过 {self._candidate_timeout_minutes} 分钟"
                     f"（{record['percent']}%）",
-                    task=task,
                 )
                 return
             record.update({
@@ -851,7 +862,6 @@ class JavCloudDownload(_PluginBase):
             self._switch_candidate(
                 client, record,
                 f"任务启动超过 {self._candidate_queue_timeout_minutes} 分钟（{state}）",
-                task=task,
             )
         else:
             record.update({"state": STATE_SUBMITTED,
@@ -1369,8 +1379,10 @@ class JavCloudDownload(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "cd2_token",
-                                            "label": "API 令牌",
+                                            "label": "API 令牌（填账号密码时可不填）",
                                             "type": "password",
+                                            "hint": "账号和密码都填写时，优先用账号登录",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],
@@ -1388,7 +1400,9 @@ class JavCloudDownload(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "cd2_username",
-                                            "label": "账号（无令牌时使用）",
+                                            "label": "账号（与密码一起填写时优先）",
+                                            "hint": "用于获取完整权限 JWT；不填则使用 API 令牌",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],

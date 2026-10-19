@@ -199,6 +199,7 @@ class _FakeClient:
         self.added: list[tuple[str, str]] = []
         self.removed: list[tuple[str, list[str], bool]] = []
         self.remove_result = True
+        self.delete_result = True
 
     def list_dir(self, path):
         return self.tree.get(path, [])
@@ -208,13 +209,17 @@ class _FakeClient:
 
     def delete(self, path):
         self.deleted.append(path)
+        if not self.delete_result:
+            return False
+        self.dirs.discard(path)
+        self.tree.pop(path, None)
         return True
 
     def rename(self, path, new_name):
         self.renamed.append((path, new_name))
         return True
 
-    def find_offline(self, folder, info_hash="", name=""):
+    def find_offline(self, folder, info_hash="", name="", force_refresh=False):
         target = (info_hash or "").lower()
         for task in self.offline:
             if target and (task.infoHash or "").lower() == target:
@@ -223,7 +228,7 @@ class _FakeClient:
                 return task
         return None
 
-    def list_offline(self, folder):
+    def list_offline(self, folder, force_refresh=False):
         return list(self.offline)
 
     def add_offline(self, url, folder):
@@ -231,8 +236,15 @@ class _FakeClient:
         return "submitted"
 
     def remove_offline(self, folder, info_hashes, delete_files=False):
+        hashes = {(item or "").lower() for item in info_hashes}
         self.removed.append((folder, list(info_hashes), delete_files))
-        return self.remove_result
+        if not self.remove_result:
+            return False
+        self.offline = [
+            task for task in self.offline
+            if (task.infoHash or "").lower() not in hashes
+        ]
+        return True
 
     def quota(self, folder):
         return {"total": 100, "used": 0, "left": 100}
@@ -449,6 +461,7 @@ def _candidate_record(obj, candidates, index=0):
         "submitted_at": OLD,
         "info_hash": candidates[index]["info_hash"],
         "magnet_name": candidates[index]["name"],
+        "task_name": candidates[index]["name"],
     })
     return rec
 
@@ -485,7 +498,7 @@ check("提交后 candidate_index=0", submitted_record.get("candidate_index") == 
       str(submitted_record))
 
 timeout_client = _FakeClient(
-    {}, set(), offline=[_FakeOfflineTask("c0", "a" * 40, status=1, percent=42)]
+    {}, {"/dl/c0"}, offline=[_FakeOfflineTask("c0", "a" * 40, status=1, percent=42)]
 )
 timeout_obj = _retry_instance()
 timeout_record = _candidate_record(timeout_obj, prepared)
@@ -493,9 +506,9 @@ timeout_obj._advance_record(
     timeout_client, timeout_record,
     offline_index=timeout_obj._offline_index(timeout_client.offline),
 )
-check("超时删除任务和文件",
-      timeout_client.removed == [("/dl", ["a" * 40], True)],
-      str(timeout_client.removed))
+check("超时删除已下载文件",
+      timeout_client.deleted == ["/dl/c0"],
+      str(timeout_client.deleted))
 check("超时后换下一条候选",
       timeout_record.get("candidate_index") == 1
       and timeout_client.added[-1][0] == prepared[1]["magnet"],
@@ -521,7 +534,7 @@ check("完成只发一次通知", len(finish_obj.messages) == 1
       and "完成" in finish_obj.messages[0].get("title", ""), str(finish_obj.messages))
 
 exhaust_client = _FakeClient(
-    {}, set(), offline=[_FakeOfflineTask("c2", "c" * 40, status=1, percent=30)]
+    {}, {"/dl/c2"}, offline=[_FakeOfflineTask("c2", "c" * 40, status=1, percent=30)]
 )
 exhaust_obj = _retry_instance()
 exhaust_record = _candidate_record(exhaust_obj, prepared, index=2)
@@ -536,16 +549,16 @@ check("耗尽后发失败通知", len(exhaust_obj.messages) == 1
       and "失败" in exhaust_obj.messages[0].get("title", ""), str(exhaust_obj.messages))
 
 remove_client = _FakeClient(
-    {}, set(), offline=[_FakeOfflineTask("c0", "a" * 40, status=1, percent=10)]
+    {}, {"/dl/c0"}, offline=[_FakeOfflineTask("c0", "a" * 40, status=1, percent=10)]
 )
-remove_client.remove_result = False
+remove_client.delete_result = False
 remove_obj = _retry_instance()
 remove_record = _candidate_record(remove_obj, prepared)
 remove_obj._advance_record(
     remove_client, remove_record,
     offline_index=remove_obj._offline_index(remove_client.offline),
 )
-check("删除失败时不换种",
+check("删除文件失败时不换种",
       remove_record.get("candidate_index") == 0 and remove_client.added == [],
       str(remove_record))
 remove_record["remove_attempts"] = jcd.MAX_REMOVE_ATTEMPTS - 1
@@ -553,11 +566,11 @@ remove_obj._advance_record(
     remove_client, remove_record,
     offline_index=remove_obj._offline_index(remove_client.offline),
 )
-check("删除连续失败后终止", remove_record.get("state") == jcd.STATE_FAILED,
+check("删除文件连续失败后终止", remove_record.get("state") == jcd.STATE_FAILED,
       str(remove_record))
 
 queue_client = _FakeClient(
-    {}, set(), offline=[_FakeOfflineTask("c0", "a" * 40, status=0, percent=0)]
+    {}, {"/dl/c0"}, offline=[_FakeOfflineTask("c0", "a" * 40, status=0, percent=0)]
 )
 queue_obj = _retry_instance()
 queue_record = _candidate_record(queue_obj, prepared)
@@ -569,7 +582,7 @@ queue_obj._advance_record(
 )
 check("排队超时也换种",
       queue_record.get("candidate_index") == 1
-      and queue_client.removed[0][2] is True,
+      and queue_client.deleted == ["/dl/c0"],
       str(queue_record))
 
 service_obj = _retry_instance()

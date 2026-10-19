@@ -31,20 +31,21 @@
 | `candidate_queue_timeout_minutes` | 10 | 从提交到进入下载的启动超时 |
 | `max_candidates` | 3 | 一个番号最多尝试候选数 |
 
-## 超时删除与换种
+## 超时清理与换种
 
-超时后调用 CD2：
+超时后**不删除 115 离线任务记录**，只删除当前候选已经下载的文件：
 
 ```text
-RemoveOfflineFiles(path=云下载目录, infoHashes=[当前 infoHash], deleteFiles=True)
+FindFileByPath / DeleteFile（云下载目录下的任务目录）
 ```
 
-任务和未完成文件一起删除，然后按选种顺序提交下一条候选。
+删除后回查目录是否真的消失，然后按选种顺序提交下一条候选。
 
 - 删除失败：不提交下一条，下一轮重试删除；连续 3 次失败才终止。
-  这是为了避免两个任务同时下载。
+  这是为了避免旧文件混进下一条候选的整理结果。
 - 3 条候选都超时：任务标记 `failed`，发 MP 失败通知。
 - 候选按 `infoHash` 去重，避免同一个种子换名字重复尝试。
+- 115 离线任务记录会保留，可能仍显示在 115/CD2 的任务列表里，这是预期行为。
 
 ## 通知
 
@@ -60,5 +61,5 @@ RemoveOfflineFiles(path=云下载目录, infoHashes=[当前 infoHash], deleteFil
 ## 已知边界
 
 - 5 分钟是严格值，大文件在 5 分钟内下不完也会被删除换种。
-- 删除接口依赖 CD2 的 `RemoveOfflineFiles`；线上需要确认它确实能同时删除任务和文件。
+- 超时只删已下载文件，115 离线任务记录会保留；任务记录本身不影响下一候选。
 - `pipeline.py` 里的 `wait_offline` / `run_once` 是历史实现，当前插件主流程未使用。
