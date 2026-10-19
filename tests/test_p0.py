@@ -173,7 +173,7 @@ def _tidy_case(delete_junk_only: bool):
     tree = {
         "/dl/old": [
             _File("main.mp4", 10 * GB),
-            _File("sample.mp4", 100 * 1024 ** 2),
+            _File("sample.mp4", 400 * 1024 ** 2),
             _File("main.chs.srt", 100 * 1024),
             _File("ad.txt", 1024),
         ]
@@ -202,7 +202,7 @@ def _tidy_multipart_case(prefix: str):
         "/dl/multi": [
             _File(f"{prefix}-CD1.mp4", 6 * GB),
             _File(f"{prefix}-CD2.mp4", 6 * GB),
-            _File("sample.mp4", 100 * 1024 ** 2),
+            _File("sample.mp4", 400 * 1024 ** 2),
             _File(f"{prefix}-CD1.chs.srt", 100 * 1024),
         ]
     }
@@ -340,6 +340,26 @@ check("4K优先于普通大体积", (picked.get("chosen") or {}).get("name") == 
 picked = selector.select([_magnet("X 720P 10GB", 10), _magnet("X 5GB", 5)])
 check("720P被排除", (picked.get("chosen") or {}).get("name") == "X 5GB", str(picked))
 check("720P记录原因", any(x.get("reason") == "720P" for x in picked.get("excluded", [])), str(picked.get("excluded")))
+
+# ---------- 小视频阈值与规则开关 ----------
+
+picked = selector.select([_magnet("X 200MB", 0.2), _magnet("X 5GB", 5)])
+check("小于300MB的候选被排除", (picked.get("chosen") or {}).get("name") == "X 5GB", str(picked))
+check("小视频记录原因", any("小于300MB" in x.get("reason", "") for x in picked.get("excluded", [])), str(picked.get("excluded")))
+
+picked = selector.select([_magnet("X-UC 10GB", 10), _magnet("X-C 5GB", 5)], enable_rules=False)
+check("规则关闭：直接按体积最大", (picked.get("chosen") or {}).get("name") == "X-UC 10GB", str(picked))
+check("规则关闭：档位标记", picked.get("tier") == "体积最大（规则关闭）", str(picked))
+
+tree = {"/dl/small": [_File("main.mp4", 10 * GB), _File("tiny.mp4", 100 * 1024 ** 2)]}
+client = _FakeClient(tree, {"/dl/small"})
+result = pipeline.tidy_dir(client, "/dl/small", "ABC-123", delete_junk_only=True)
+check("整理：小于300MB的视频删除", "/dl/small/tiny.mp4" in client.deleted, str(client.deleted))
+
+tree = {"/dl/all-small": [_File("tiny.mp4", 100 * 1024 ** 2)]}
+client = _FakeClient(tree, {"/dl/all-small"})
+result = pipeline.tidy_dir(client, "/dl/all-small", "ABC-123", delete_junk_only=True)
+check("整理：全部小于阈值时不整理", result.get("ok") is False and "小于" in result.get("reason", ""), str(result))
 
 # ---------- JavRanking 缓存数据源 ----------
 

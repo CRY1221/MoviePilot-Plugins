@@ -46,7 +46,7 @@ class JavCloudDownload(_PluginBase):
     plugin_name = "番号云下载"
     plugin_desc = "按番号从 JavBus 取种，经 CloudDrive2 云下载到 115，完成后清理、改名并可移动到库目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.1.6"
+    plugin_version = "0.1.7"
     plugin_label = "工具"
     plugin_author = "CRY1221"
     plugin_config_prefix = "javclouddownload_"
@@ -70,6 +70,9 @@ class JavCloudDownload(_PluginBase):
     _max_wait_minutes = 240
     _source_mode = "javbus"
     _javranking_dir = ""
+    _enable_filter_rules = True
+    _min_video_size_mb = 300
+    _min_video_size_bytes = 300 * 1024 ** 2
     _status = "未启用"
 
     def __init__(self) -> None:
@@ -94,6 +97,10 @@ class JavCloudDownload(_PluginBase):
             self._source_mode = "javbus"
         default_cache = str(Path(self.get_data_path()) / "javranking")
         self._javranking_dir = (config.get("javranking_dir") or default_cache).strip()
+        self._enable_filter_rules = bool(config.get("enable_filter_rules", True))
+        raw_min_size = config.get("min_video_size_mb")
+        self._min_video_size_mb = 300 if raw_min_size is None else max(0, int(raw_min_size))
+        self._min_video_size_bytes = self._min_video_size_mb * 1024 ** 2
         self._cd2_host = (config.get("cd2_host") or "").strip()
         self._cd2_port = int(config.get("cd2_port") or 19798)
         self._cd2_token = (config.get("cd2_token") or "").strip()
@@ -236,6 +243,8 @@ class JavCloudDownload(_PluginBase):
             detail["magnets"],
             allow_uncensored=self._allow_uncensored,
             allow_junk=self._allow_junk,
+            enable_rules=self._enable_filter_rules,
+            min_video_size=self._min_video_size_bytes,
         )
         return {
             "code": detail.get("code") or normalize_code(code),
@@ -484,7 +493,12 @@ class JavCloudDownload(_PluginBase):
             self._stamp(record)
             return
 
-        tidied = tidy_dir(client, target, name, delete_junk_only=self._delete_junk_only)
+        tidied = tidy_dir(
+            client, target, name,
+            delete_junk_only=self._delete_junk_only,
+            enable_filter_rules=self._enable_filter_rules,
+            min_video_size=self._min_video_size_bytes,
+        )
         record["tidy"] = tidied
         if not tidied.get("ok"):
             message = f"整理失败：{tidied.get('reason')}"
@@ -848,6 +862,42 @@ class JavCloudDownload(_PluginBase):
                                 "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "enable_filter_rules",
+                                            "label": "启用识别筛选规则",
+                                            "hint": "关闭后不排除无码、假4K、720P和小视频，直接按体积选最大",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "min_video_size_mb",
+                                            "label": "小视频阈值（MB）",
+                                            "type": "number",
+                                            "hint": "小于该体积的视频视为垃圾，默认 300MB",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
                                         "component": "VTextField",
                                         "props": {
                                             "model": "cd2_host",
@@ -1023,8 +1073,9 @@ class JavCloudDownload(_PluginBase):
                         "props": {"type": "info", "variant": "tonal"},
                         "text": "数据源：JavBus 直连可用；JavRanking 读取本地缓存，"
                                 "没有详情页缓存的番号无法取磁力，可改用「自动」回退 JavBus。"
-                                "选种顺序：第一会所新片 > 4K > 中文字幕 > 体积最大；"
-                                "无码破解与广告资源默认排除。任务由定时服务异步推进。",
+                                "选种顺序：第一会所新片 > 中文字幕 > 4K（≥5GB）> 体积最大；"
+                                "无码破解、假4K、720P 与小于阈值的小视频默认排除。"
+                                "任务由定时服务异步推进。",
                     },
                 ],
             }
@@ -1032,6 +1083,8 @@ class JavCloudDownload(_PluginBase):
             "enabled": False,
             "source_mode": "javbus",
             "javranking_dir": "",
+            "enable_filter_rules": True,
+            "min_video_size_mb": 300,
             "source_base": "https://www.javbus.com",
             "cd2_host": "192.168.5.103",
             "cd2_port": 19798,

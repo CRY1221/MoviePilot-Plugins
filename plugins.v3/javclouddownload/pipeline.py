@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from app.sdk.logging import logger
 
 from .cd2 import Cd2Client, Cd2Error, status_name
-from .selector import pick_video, select
+from .selector import DEFAULT_MIN_VIDEO_SIZE, pick_video, select
 from .source import JavBusSource, info_hash_of, normalize_code
 
 # 任务状态
@@ -194,7 +194,9 @@ def dir_has_video(client: Cd2Client, path: str) -> bool:
 
 
 def tidy_dir(client: Cd2Client, target: str, name: str,
-             delete_junk_only: bool = True) -> Dict[str, Any]:
+             delete_junk_only: bool = True,
+             enable_filter_rules: bool = True,
+             min_video_size: int = DEFAULT_MIN_VIDEO_SIZE) -> Dict[str, Any]:
     """
     清理目录内的广告文件并重命名视频、字幕与目录。
 
@@ -204,6 +206,8 @@ def tidy_dir(client: Cd2Client, target: str, name: str,
     :param target: 目标目录
     :param name: 目标番号名
     :param delete_junk_only: 为 True 时只保留主视频与字幕；为 False 时保留全部视频与字幕
+    :param enable_filter_rules: 是否启用识别筛选规则
+    :param min_video_size: 小于该体积的视频视为垃圾
     :return: 整理结果
     """
     files = collect_files(client, target)
@@ -214,7 +218,19 @@ def tidy_dir(client: Cd2Client, target: str, name: str,
         item for item in files
         if PurePosixPath(item[2]).suffix.lower() in VIDEO_EXT_SET
     ]
-    video = pick_video(files)
+    if enable_filter_rules and int(min_video_size or 0) > 0:
+        threshold = int(min_video_size)
+        videos = [
+            item for item in videos
+            if item[1] <= 0 or item[1] >= threshold
+        ]
+        if not videos:
+            return {
+                "ok": False,
+                "reason": f"所有视频都小于 {round(threshold / 1024 ** 2)}MB",
+                "files": [f[2] for f in files],
+            }
+    video = pick_video(videos)
     if video is None:
         return {"ok": False, "reason": "未找到视频文件", "files": [f[2] for f in files]}
 
@@ -414,6 +430,8 @@ def run_once(
     poll_interval: int = 10,
     move_target: str = "",
     delete_junk_only: bool = True,
+    enable_filter_rules: bool = True,
+    min_video_size: int = DEFAULT_MIN_VIDEO_SIZE,
     dry_run: bool = False,
     should_stop=None,
 ) -> Dict[str, Any]:
@@ -431,6 +449,8 @@ def run_once(
     :param poll_interval: 轮询间隔
     :param move_target: 整理完成后移动到的父目录；为空则不移动
     :param delete_junk_only: 只删非视频文件
+    :param enable_filter_rules: 是否启用识别筛选规则
+    :param min_video_size: 小于该体积的视频视为垃圾
     :param dry_run: 只做挑选与规划，不提交
     :param should_stop: 可选中止回调
     :return: 流程结果
@@ -445,8 +465,13 @@ def run_once(
     finally:
         source.close()
 
-    picked = select(detail["magnets"], allow_uncensored=allow_uncensored,
-                    allow_junk=allow_junk)
+    picked = select(
+        detail["magnets"],
+        allow_uncensored=allow_uncensored,
+        allow_junk=allow_junk,
+        enable_rules=enable_filter_rules,
+        min_video_size=min_video_size,
+    )
     result["title"] = detail.get("title")
     result["release_date"] = detail.get("release_date")
     result["magnet_total"] = picked.get("total")
@@ -496,7 +521,12 @@ def run_once(
                        "reason": "任务已完成但未找到落盘目录"})
         return result
 
-    tidied = tidy_dir(cd2, target_dir, target_name, delete_junk_only=delete_junk_only)
+    tidied = tidy_dir(
+        cd2, target_dir, target_name,
+        delete_junk_only=delete_junk_only,
+        enable_filter_rules=enable_filter_rules,
+        min_video_size=min_video_size,
+    )
     result["tidy"] = tidied
     if not tidied.get("ok"):
         result.update({"ok": False, "state": STATE_FINISHED,
