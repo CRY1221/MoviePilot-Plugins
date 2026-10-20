@@ -16,8 +16,9 @@ import html as html_lib
 import json
 import re
 import sqlite3
+import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -45,7 +46,54 @@ MAGNET_NAME = re.compile(
 MAGNET_SIZE = re.compile(
     r'class="[^"]*magnet-tag--size[^"]*"[^>]*>([^<]+)<', re.I
 )
-DETAIL_TTL_HOURS = 168
+
+# Cloudflare：浏览器过一次盾取得 cf_clearance，之后普通 HTTP 复用它。
+# 票失效或再次被拦时才重新开浏览器；取票失败再按 1/5 分钟冷却并回退 JavBus。
+CHALLENGE_RETRY_SECONDS = 5.0
+COOLDOWN_FIRST_SECONDS = 60
+COOLDOWN_REPEAT_SECONDS = 300
+TICKET_FILENAME = "cf_ticket.json"
+TICKET_TTL_SECONDS = 1800
+TICKET_REUSE_SECONDS = 10
+_block_until = 0.0
+_challenge_streak = 0
+_block_lock = threading.Lock()
+_ticket_lock = threading.Lock()
+
+
+def _blocked() -> bool:
+    """返回当前是否处于 Cloudflare 冷却期。"""
+    with _block_lock:
+        return time.time() < _block_until
+
+
+def _block_for(seconds: int = COOLDOWN_FIRST_SECONDS) -> None:
+    """进入冷却期，期间不再发起直连请求。"""
+    global _block_until
+    with _block_lock:
+        _block_until = max(_block_until, time.time() + seconds)
+
+
+def _note_challenge() -> int:
+    """记录一次挑战失败并按连续次数设置冷却时长。"""
+    global _challenge_streak
+    with _block_lock:
+        _challenge_streak += 1
+        seconds = (
+            COOLDOWN_FIRST_SECONDS
+            if _challenge_streak == 1
+            else COOLDOWN_REPEAT_SECONDS
+        )
+    _block_for(seconds)
+    return seconds
+
+
+def _reset_challenge() -> None:
+    """请求成功后清除连续挑战计数。"""
+    global _challenge_streak, _block_until
+    with _block_lock:
+        _challenge_streak = 0
+        _block_until = 0.0
 
 
 def parse_magnet_html(text: str) -> List[Dict[str, Any]]:
@@ -303,50 +351,222 @@ class JavRankingSource:
         finally:
             conn.close()
 
-    def _fetch_page(self, url: str) -> str:
-        """带 3 秒全局限速抓取 JavRanking 详情页。"""
+    @property
+    def _ticket_path(self) -> Path:
+        """Cloudflare 通行票缓存文件。"""
+        return self._dir / TICKET_FILENAME
+
+    def _load_ticket(self) -> Optional[Dict[str, Any]]:
+        """读取本地保存的通行票。"""
+        try:
+            data = json.loads(self._ticket_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        cookies = data.get("cookies")
+        ua = str(data.get("ua") or "").strip()
+        if not isinstance(cookies, dict) or not cookies or not ua:
+            return None
+        return data
+
+    def _save_ticket(self, cookies: Dict[str, str], ua: str) -> None:
+        """原子写入通行票。"""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "cookies": cookies,
+            "ua": ua,
+            "created_at": time.time(),
+        }
+        temp = self._ticket_path.with_suffix(".tmp")
+        temp.write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+        temp.replace(self._ticket_path)
+
+    def _clear_ticket(self) -> None:
+        """删除失效的通行票。"""
+        try:
+            self._ticket_path.unlink()
+        except OSError:
+            pass
+
+    def _fresh_ticket(self) -> Optional[Dict[str, Any]]:
+        """返回仍在有效期内的通行票。"""
+        ticket = self._load_ticket()
+        if not ticket:
+            return None
+        created_at = float(ticket.get("created_at") or 0)
+        if time.time() - created_at > TICKET_TTL_SECONDS:
+            return None
+        return ticket
+
+    def _mint_ticket(self) -> Dict[str, Any]:
+        """用 cloakbrowser 过一次盾并保存 cf_clearance。"""
+        with _ticket_lock:
+            existing = self._fresh_ticket()
+            if existing:
+                created_at = float(existing.get("created_at") or 0)
+                if time.time() - created_at < TICKET_REUSE_SECONDS:
+                    return existing
+            try:
+                from cloakbrowser import launch_context
+            except Exception as error:  # pragma: no cover - 依赖容器环境
+                raise JavRankingError(
+                    f"未安装 cloakbrowser，无法过 Cloudflare：{error}"
+                ) from error
+            context = None
+            try:
+                context = launch_context(headless=True)
+                page = context.new_page()
+                page.goto(
+                    "https://javranking.cc/zh-hans/",
+                    timeout=60000,
+                    wait_until="domcontentloaded",
+                )
+                deadline = time.time() + 60
+                while time.time() < deadline:
+                    html = page.evaluate(
+                        "() => document.documentElement.outerHTML"
+                    )
+                    if (
+                        "Just a moment" not in html
+                        and "JavRanking" in page.title()
+                    ):
+                        break
+                    page.wait_for_timeout(1000)
+                cookies = {
+                    str(item.get("name")): str(item.get("value"))
+                    for item in context.cookies()
+                    if item.get("name") and item.get("value")
+                }
+                ua = str(page.evaluate("() => navigator.userAgent") or "")
+                if not cookies.get("cf_clearance") or not ua:
+                    raise JavRankingError("浏览器未能取得 cf_clearance")
+                self._save_ticket(cookies, ua)
+                logger.info(
+                    f"JavRanking 已取得 Cloudflare 通行票"
+                    f"（{len(cookies)} 个 cookie），有效期按 {TICKET_TTL_SECONDS // 60} 分钟处理"
+                )
+                return {
+                    "cookies": cookies,
+                    "ua": ua,
+                    "created_at": time.time(),
+                }
+            except JavRankingError:
+                raise
+            except Exception as error:  # pragma: no cover - 浏览器环境相关
+                raise JavRankingError(f"浏览器过盾失败：{error}") from error
+            finally:
+                if context is not None:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+
+    def _http_get(self, url: str,
+                  ticket: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """
+        用普通 HTTP 请求详情页。
+
+        :param url: 详情页地址
+        :param ticket: 通行票；为空表示裸请求
+        :return: 200 时返回文本；命中 Cloudflare 挑战时返回 None
+        """
+        ua = str((ticket or {}).get("ua") or USER_AGENT)
         headers = {
-            "User-Agent": USER_AGENT,
+            "User-Agent": ua,
             "Accept-Language": "zh-CN,zh;q=0.9",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": "https://javranking.cc/zh-hans/",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Upgrade-Insecure-Requests": "1",
         }
+        cookies = (ticket or {}).get("cookies") or None
         http = RequestUtils(headers=headers, timeout=30, use_session=True)
         try:
             throttle_wait("javranking")
-            response = http.request("get", url, headers=dict(headers))
-            if response is None or response.status_code != 200:
-                status = getattr(response, "status_code", "无响应")
-                raise JavRankingError(f"请求 JavRanking 失败：{status}")
-            content = getattr(response, "content", None)
-            if isinstance(content, (bytes, bytearray)):
-                return content.decode("utf-8", "replace")
-            return response.text or ""
+            response = http.request(
+                "get", url, headers=dict(headers), cookies=cookies
+            )
+            if response is None:
+                raise JavRankingError("请求 JavRanking 失败：无响应")
+            status = getattr(response, "status_code", 0)
+            if status == 200:
+                _reset_challenge()
+                content = getattr(response, "content", None)
+                if isinstance(content, (bytes, bytearray)):
+                    return content.decode("utf-8", "replace")
+                return response.text or ""
+            challenge = (
+                status in (403, 503)
+                and str(
+                    (getattr(response, "headers", {}) or {}).get(
+                        "cf-mitigated", ""
+                    )
+                ).lower() == "challenge"
+            )
+            if challenge:
+                return None
+            raise JavRankingError(f"请求 JavRanking 失败：HTTP {status}")
         finally:
             try:
                 http.close()
             except Exception:
                 pass
 
+    def _fetch_page(self, url: str) -> str:
+        """抓取 JavRanking 详情页；优先复用通行票，必要时开浏览器取票。"""
+        if _blocked():
+            raise JavRankingError(
+                "JavRanking 处于 Cloudflare 冷却期，暂时跳过直连抓取"
+            )
+        ticket = self._fresh_ticket()
+        if ticket:
+            text = self._http_get(url, ticket)
+            if text is not None:
+                return text
+            # 票已失效：删掉后重新取票
+            self._clear_ticket()
+        else:
+            text = self._http_get(url)
+            if text is not None:
+                return text
+            logger.warning(
+                "JavRanking 触发 Cloudflare 挑战，"
+                f"{CHALLENGE_RETRY_SECONDS:g} 秒后重试"
+            )
+            time.sleep(CHALLENGE_RETRY_SECONDS)
+            text = self._http_get(url)
+            if text is not None:
+                return text
+        try:
+            ticket = self._mint_ticket()
+            text = self._http_get(url, ticket)
+            if text is not None:
+                return text
+        except JavRankingError as error:
+            logger.warning(f"JavRanking 过盾失败：{error}")
+        seconds = _note_challenge()
+        raise JavRankingError(
+            "JavRanking 触发 Cloudflare 挑战（403），"
+            f"冷却 {seconds // 60} 分钟后重试"
+        )
+
     def fetch_remote_detail(self, code: str) -> Dict[str, Any]:
         """
-        读取详情；缓存没有磁力或已过期时按需抓取 JavRanking 详情页。
+        抓取 JavRanking 详情页并返回磁力。
+
+        详情缓存只提供番号索引和详情页地址，不再用旧磁力兜底；
+        抓取失败时由上层直接回退 JavBus，避免使用过期种子。
 
         :param code: 番号
         :return: 与 JavBusSource.fetch_detail 相同形状的字典
         """
         normalized = normalize_code(code)
         cached = self.fetch_detail(normalized)
-        fetched_at = str(cached.get("details_fetched_at") or "")
-        fresh = False
-        if cached.get("magnets") and fetched_at:
-            try:
-                fresh = datetime.strptime(fetched_at, "%Y-%m-%d %H:%M:%S") > (
-                    datetime.now() - timedelta(hours=DETAIL_TTL_HOURS)
-                )
-            except ValueError:
-                fresh = False
-        if fresh:
-            return cached
         url = str(cached.get("detail_url") or "")
         if not url:
             raise JavRankingError(f"JavRanking 缓存中没有 {normalized} 的详情页地址")
@@ -354,13 +574,8 @@ class JavRankingSource:
             text = self._fetch_page(url)
             magnets = parse_magnet_html(text)
         except Exception as error:
-            if cached.get("magnets"):
-                logger.warning(f"JavRanking 抓取失败，使用旧缓存：{error}")
-                return cached
             raise JavRankingError(f"JavRanking 抓取失败：{error}") from error
         if not magnets:
-            if cached.get("magnets"):
-                return cached
             raise JavRankingError(f"JavRanking 详情页没有 {normalized} 的磁力")
         self._save_detail(normalized, magnets)
         return self.fetch_detail(normalized)

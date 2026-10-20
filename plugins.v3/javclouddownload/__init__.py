@@ -14,6 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 
 from app.plugins import _PluginBase
 from app.sdk.logging import logger
@@ -38,6 +39,7 @@ from .pipeline import (
     STATE_ORGANIZED,
     STATE_SKIPPED,
     STATE_SUBMITTED,
+    TERMINAL_STATES,
     dir_has_video,
     locate_download_dir,
     move_dir,
@@ -46,10 +48,15 @@ from .pipeline import (
     safe_name,
     tidy_dir,
 )
-from .selector import has_chinese_sub, select
+from .selector import DEFAULT_MIN_VIDEO_SIZE, has_chinese_sub, select
 from .source import JavBusSource, JavBusError, info_hash_of, normalize_code
 
 MAX_RECORDS = 200
+
+# 待提交队列：只存番号与批次，任务记录在真正提交时创建
+MAX_QUEUE = 1000
+QUEUE_BATCH = 5
+BATCH_FAILURE_DISPLAY = 20
 
 # 整理阶段连续失败多少次后停止重试
 MAX_ORGANIZE_ATTEMPTS = 5
@@ -90,7 +97,7 @@ class JavCloudDownload(_PluginBase):
     plugin_name = "番号云下载"
     plugin_desc = "按番号从 JavBus 取种，经 CloudDrive2 云下载到 115，完成后清理、改名并可移动到库目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.8.1"
+    plugin_version = "0.9.0"
     plugin_label = "工具"
     plugin_author = "CRY1221"
     plugin_config_prefix = "javclouddownload_"
@@ -128,14 +135,16 @@ class JavCloudDownload(_PluginBase):
     _proactive_enabled = False
     _proactive: Dict[str, Any] = {}
     _enable_filter_rules = True
-    _min_video_size_mb = 300
-    _min_video_size_bytes = 300 * 1024 ** 2
+    _min_video_size_mb = 2048
+    _min_video_size_bytes = 2048 * 1024 ** 2
     _status = "未启用"
 
     def __init__(self) -> None:
         """初始化实例状态。"""
         super().__init__()
         self._tasks: Dict[str, Dict[str, Any]] = {}
+        self._queue: List[Dict[str, Any]] = []
+        self._batches: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
         self._poll_lock = threading.Lock()
 
@@ -172,7 +181,7 @@ class JavCloudDownload(_PluginBase):
         self._proactive_enabled = bool(config.get("proactive_upgrade", False))
         self._enable_filter_rules = bool(config.get("enable_filter_rules", True))
         raw_min_size = config.get("min_video_size_mb")
-        self._min_video_size_mb = 300 if raw_min_size is None else max(0, int(raw_min_size))
+        self._min_video_size_mb = 2048 if raw_min_size is None else max(0, int(raw_min_size))
         self._min_video_size_bytes = self._min_video_size_mb * 1024 ** 2
         self._cd2_host = (config.get("cd2_host") or "").strip()
         self._cd2_port = int(config.get("cd2_port") or 19798)
@@ -206,6 +215,13 @@ class JavCloudDownload(_PluginBase):
 
         stored = self.get_data("tasks") or {}
         self._tasks = stored if isinstance(stored, dict) else {}
+        queued = self.get_data("queue") or []
+        self._queue = [
+            item for item in queued
+            if isinstance(item, dict) and item.get("code")
+        ] if isinstance(queued, list) else []
+        batches = self.get_data("batches") or {}
+        self._batches = batches if isinstance(batches, dict) else {}
         proactive = self.get_data("proactive") or {}
         self._proactive = proactive if isinstance(proactive, dict) else {}
         self._register_proactive_listener()
@@ -224,6 +240,10 @@ class JavCloudDownload(_PluginBase):
             return
         self._status = (
             f"运行中，数据源 {self._source_label()}，云下载目录 {self._download_dir}"
+        )
+        logger.info(
+            f"番号云下载初始化：{self._status}，"
+            f"待提交 {len(self._queue)} 条，历史任务 {len(self._tasks)} 条"
         )
         state = self.get_data("proactive_state") or {}
         if not isinstance(state, dict):
@@ -272,6 +292,15 @@ class JavCloudDownload(_PluginBase):
             }
         ]
 
+    def get_agent_tools(self) -> List[Any]:
+        """注册智能助手工具：提交番号、查询进度。"""
+        if not self._enabled:
+            return []
+        # 延迟导入：离线测试没有 app.agent 模块，顶层导入会直接失败。
+        from .agent_tools import JavSubmitTool, JavTasksTool
+
+        return [JavSubmitTool, JavTasksTool]
+
     # ---------- 内部工具 ----------
 
     def _client(self) -> Cd2Client:
@@ -287,14 +316,41 @@ class JavCloudDownload(_PluginBase):
         )
 
     def _persist(self) -> None:
-        """把任务记录写回插件数据。"""
+        """把任务、队列与批次状态写回插件数据。"""
         with self._lock:
             if len(self._tasks) > MAX_RECORDS:
-                ordered = sorted(
-                    self._tasks.items(), key=lambda kv: kv[1].get("updated_at", ""), reverse=True
-                )[:MAX_RECORDS]
-                self._tasks = dict(ordered)
+                # 未结束的任务和尚未计入批次的终态记录不能被裁掉，
+                # 否则队列提交或批量汇总会永久丢失。
+                keep: List[Tuple[str, Dict[str, Any]]] = []
+                history: List[Tuple[str, Dict[str, Any]]] = []
+                for item in self._tasks.items():
+                    record = item[1]
+                    settled = (
+                        record.get("state") in TERMINAL_STATES
+                        and not (
+                            record.get("batch_id")
+                            and not record.get("batch_counted")
+                        )
+                    )
+                    (history if settled else keep).append(item)
+                if len(keep) < MAX_RECORDS:
+                    history.sort(
+                        key=lambda kv: kv[1].get("updated_at", ""), reverse=True
+                    )
+                    self._tasks = dict(keep + history[:MAX_RECORDS - len(keep)])
+            notified = [
+                item for item in self._batches.items()
+                if item[1].get("notified")
+            ]
+            if len(notified) > 20:
+                notified.sort(
+                    key=lambda kv: kv[1].get("created_at", ""), reverse=True
+                )
+                for key, _ in notified[20:]:
+                    self._batches.pop(key, None)
             self.save_data("tasks", self._tasks)
+            self.save_data("queue", self._queue)
+            self.save_data("batches", self._batches)
 
     def _stamp(self, record: Dict[str, Any]) -> None:
         """更新记录时间戳。"""
@@ -620,6 +676,7 @@ class JavCloudDownload(_PluginBase):
         self._stamp(record)
         with self._lock:
             self._tasks[record["code"]] = record
+        logger.info(f"番号云下载跳过 {record.get('code')}：{message}")
         return {
             "code": record["code"],
             "ok": True,
@@ -761,8 +818,11 @@ class JavCloudDownload(_PluginBase):
         return True
 
     def _notify_finish(self, record: Dict[str, Any]) -> None:
-        """发送一次下载完成通知。"""
+        """发送一次下载完成通知。批量提交只发最终汇总。"""
         if record.get("notified_finish"):
+            return
+        if record.get("batch_id"):
+            record["notified_finish"] = True
             return
         if _already_notified("finish", record):
             record["notified_finish"] = True
@@ -781,8 +841,11 @@ class JavCloudDownload(_PluginBase):
             logger.warning(f"番号云下载完成通知发送失败：{error}")
 
     def _notify_failure(self, record: Dict[str, Any], message: str) -> None:
-        """发送一次最终失败通知。"""
+        """发送一次最终失败通知。批量提交只发最终汇总。"""
         if record.get("notified_failure"):
+            return
+        if record.get("batch_id"):
+            record["notified_failure"] = True
             return
         if _already_notified("failure", record):
             record["notified_failure"] = True
@@ -805,6 +868,9 @@ class JavCloudDownload(_PluginBase):
         """整理/落盘失败时单独通知，避免被理解成下载失败。"""
         if record.get("notified_failure"):
             return
+        if record.get("batch_id"):
+            record["notified_failure"] = True
+            return
         if _already_notified("organize_failure", record):
             record["notified_failure"] = True
             return
@@ -826,6 +892,7 @@ class JavCloudDownload(_PluginBase):
         """把任务标记为最终失败并发通知。"""
         record.update({"state": STATE_FAILED, "message": message})
         self._stamp(record)
+        logger.error(f"番号云下载失败 {record.get('code')}：{message}")
         self._notify_failure(record, message)
 
     # ---------- 核心动作 ----------
@@ -880,7 +947,23 @@ class JavCloudDownload(_PluginBase):
                     loaded.append((name, future.result()))
                 except Exception as error:
                     errors.append(f"{name}：{error}")
-                    logger.info(f"{name} 获取失败：{error}")
+                    if "冷却期" in str(error):
+                        logger.debug(f"{name} 获取失败（冷却期）：{error}")
+                    else:
+                        logger.info(f"{name} 获取失败：{error}")
+        if (
+            self._use_javranking
+            and not self._use_javbus
+            and not any(detail.get("magnets") for _, detail in loaded)
+        ):
+            # Cloudflare 挑战下 JavRanking 直连不可用时，用 JavBus 兜底，
+            # 避免只勾 JavRanking 的配置完全下不了种。
+            logger.warning("JavRanking 不可用，自动回退 JavBus 取种")
+            try:
+                loaded.append(("JavBus", load_javbus()))
+            except Exception as error:
+                errors.append(f"JavBus：{error}")
+                logger.warning(f"JavBus 回退失败：{error}")
         loaded.sort(key=lambda item: 0 if item[0] == "JavRanking" else 1)
         details = [detail for _, detail in loaded]
         if not details:
@@ -944,6 +1027,95 @@ class JavCloudDownload(_PluginBase):
             "candidates": (picked.get("candidates") or [])[:20],
         }
 
+    def enqueue(self, codes: List[str]) -> Dict[str, Any]:
+        """
+        把番号加入待提交队列并立即返回。
+
+        实际的取种与 115 提交由定时服务在后台逐条完成；
+        同一个批次的全部任务结束后发一条汇总通知。
+
+        :param codes: 番号列表
+        :return: 入队结果
+        """
+        if not self._enabled:
+            return {"ok": False, "reason": "插件未启用"}
+        if not self._download_dir:
+            return {"ok": False, "reason": "未配置云下载目录"}
+        normalized: List[str] = []
+        invalid: List[str] = []
+        for raw in codes or []:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            code = normalize_code(text)
+            if code:
+                normalized.append(code)
+            else:
+                invalid.append(text)
+        with self._lock:
+            queued = {str(item.get("code") or "") for item in self._queue}
+            busy = {
+                code for code, record in self._tasks.items()
+                if record.get("state") in ACTIVE_STATES
+            }
+            accepted: List[str] = []
+            skipped: List[Dict[str, str]] = []
+            for code in dict.fromkeys(normalized):
+                if code in queued or code in busy:
+                    skipped.append({"code": code, "reason": "已在队列或处理中"})
+                else:
+                    accepted.append(code)
+            if len(self._queue) + len(accepted) > MAX_QUEUE:
+                return {
+                    "ok": False,
+                    "reason": (
+                        f"队列已满：当前 {len(self._queue)} 条，上限 {MAX_QUEUE} 条，"
+                        f"本次最多还能加入 {max(0, MAX_QUEUE - len(self._queue))} 条"
+                    ),
+                }
+            if not accepted:
+                return {
+                    "ok": True,
+                    "queued": 0,
+                    "skipped": skipped,
+                    "invalid": invalid,
+                    "message": "这些番号已在队列或处理中，没有新增",
+                }
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            batch_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6]}"
+            ahead = len(self._queue)
+            for code in accepted:
+                self._queue.append({
+                    "code": code,
+                    "batch_id": batch_id,
+                    "added_at": now,
+                })
+            self._batches[batch_id] = {
+                "id": batch_id,
+                "created_at": now,
+                "total": len(accepted),
+                "done": 0,
+                "failed": 0,
+                "skipped": 0,
+                "failures": [],
+                "notified": False,
+                "finished_at": "",
+            }
+            self._persist()
+        logger.info(
+            f"番号云下载入队 {len(accepted)} 条，前面 {ahead} 条，"
+            f"批次 {batch_id}"
+        )
+        return {
+            "ok": True,
+            "batch_id": batch_id,
+            "queued": len(accepted),
+            "queue_size": ahead + len(accepted),
+            "skipped": skipped,
+            "invalid": invalid,
+            "message": f"已添加至队列：{len(accepted)} 条（前面还有 {ahead} 条）",
+        }
+
     def submit(self, codes: List[str], wait_seconds: int = 0,
                upgrade: bool = False, force: bool = False) -> Dict[str, Any]:
         """
@@ -982,21 +1154,29 @@ class JavCloudDownload(_PluginBase):
         return {"ok": all(item.get("ok", True) for item in results), "items": results}
 
     def _submit_one(self, code: str, wait_seconds: int,
-                    upgrade: bool = False, force: bool = False) -> Dict[str, Any]:
+                    upgrade: bool = False, force: bool = False,
+                    batch_id: str = "") -> Dict[str, Any]:
         """
         处理单个番号的提交。
 
         :param code: 归一化番号
         :param wait_seconds: 同步等待秒数
         :param upgrade: 是否请求洗版
+        :param force: 强制洗版
+        :param batch_id: 所属批量任务 ID；空表示不是队列提交
         :return: 处理结果
         """
         name = safe_name(code)
+        record = self._tasks.get(code) or self._new_record(code, name)
+        record["name"] = name
+        if batch_id:
+            record["batch_id"] = batch_id
+            record["batch_counted"] = False
+            record["notified_finish"] = False
+            record["notified_failure"] = False
         upgrade_requested = bool(self._enable_upgrade and (upgrade or force))
         existing = self._find_library_item(code, probe_missing=upgrade_requested)
         if existing is not None and not upgrade_requested:
-            record = self._tasks.get(code) or self._new_record(code, name)
-            record["name"] = name
             return self._skip_record(record, "Emby 库已有该番号，未启用洗版，跳过下载")
 
         detail = self.preview(code)
@@ -1009,7 +1189,7 @@ class JavCloudDownload(_PluginBase):
         if not candidates:
             raise JavBusError(f"{code} 没有可提交的候选磁力")
         name = safe_name(detail.get("code") or code)
-        record = self._tasks.get(code) or self._new_record(code, name)
+        record["name"] = name
         if existing is not None:
             qualities = [
                 estimate_candidate_quality(
@@ -1380,11 +1560,13 @@ class JavCloudDownload(_PluginBase):
         record["task_name"] = task.name
         state = status_name(task.status)
         record["offline_state"] = state
+        previous_percent = float(record.get("percent") or 0)
         record["percent"] = round(float(task.percendDone or 0), 1)
 
         if state == "OFFLINE_FINISHED":
             record["state"] = STATE_FINISHED
             record["message"] = "下载完成，开始整理"
+            logger.info(f"番号云下载 {record.get('code')} 下载完成，开始整理")
             self._record_attempt(record, "finished", f"{record['percent']}%")
             self._stamp(record)
             self._notify_finish(record)
@@ -1392,10 +1574,16 @@ class JavCloudDownload(_PluginBase):
             return
 
         if state == "OFFLINE_ERROR":
+            logger.warning(f"番号云下载 {record.get('code')} 离线任务失败，换种")
             self._switch_candidate(client, record, "离线任务失败", result="error")
             return
 
         if state == "OFFLINE_DOWNLOADING":
+            if record["percent"] - previous_percent >= 10:
+                logger.info(
+                    f"番号云下载 {record.get('code')} 下载中 "
+                    f"{record['percent']}%"
+                )
             if not record.get("candidate_started_at"):
                 record["candidate_started_at"] = datetime.now().strftime(
                     "%Y-%m-%d %H:%M:%S"
@@ -1493,7 +1681,8 @@ class JavCloudDownload(_PluginBase):
             client, target, name,
             delete_junk_only=self._delete_junk_only,
             enable_filter_rules=self._enable_filter_rules,
-            min_video_size=self._min_video_size_bytes,
+            # 整理阶段只清小视频垃圾，和候选最小体积（默认 2GB）是两回事
+            min_video_size=DEFAULT_MIN_VIDEO_SIZE,
             file_name=file_base,
         )
         if tidied.get("ok"):
@@ -1507,6 +1696,20 @@ class JavCloudDownload(_PluginBase):
                 logger.warning(f"清理空目录失败：{error}")
         record["tidy"] = tidied
         if not tidied.get("ok"):
+            reason = str(tidied.get("reason") or "")
+            if reason.startswith("所有视频都小于") or reason == "未找到视频文件":
+                # 盘里没有可用的视频文件（例如只有 ISO 镜像和广告），
+                # 重试同一个种子没有意义，直接删掉换下一条候选。
+                logger.warning(
+                    f"番号云下载 {record.get('code')} 没有可用视频，"
+                    f"换下一条候选：{reason}"
+                )
+                self._switch_candidate(
+                    client, record, f"整理失败：{reason}",
+                    result="organize_failed",
+                    exhausted_message=f"所有候选都没有可用视频（{reason}）",
+                )
+                return
             message = f"整理失败：{tidied.get('reason')}"
             if self._organize_give_up(record, message):
                 return
@@ -1639,6 +1842,149 @@ class JavCloudDownload(_PluginBase):
             record.update({"state": STATE_FINISHED, "message": message})
         self._stamp(record)
 
+    def _drain_queue(self, limit: int) -> Tuple[int, int]:
+        """
+        从队首取若干番号并执行提交。
+
+        :param limit: 本轮最多处理的条数
+        :return: ``(成功条数, 失败条数)``
+        """
+        with self._lock:
+            items = list(self._queue[:max(0, limit)])
+        if not items:
+            return 0, 0
+        ok = failed = 0
+        for item in items:
+            code = str(item.get("code") or "")
+            batch_id = str(item.get("batch_id") or "")
+            if not code:
+                self._remove_queue_item(item)
+                continue
+            record = self._tasks.get(code)
+            if record is not None and record.get("state") in ACTIVE_STATES:
+                # 上次进程在提交途中中断：任务已经在推进，直接出队
+                logger.info(f"番号云下载队列跳过 {code}：已有进行中的任务")
+                self._remove_queue_item(item)
+                continue
+            try:
+                logger.info(f"番号云下载队列提交 {code}（批次 {batch_id}）")
+                result = self._submit_one(code, 0, batch_id=batch_id)
+                if result.get("ok"):
+                    ok += 1
+                else:
+                    failed += 1
+            except Exception as error:
+                failed += 1
+                record = self._tasks.get(code) or self._new_record(
+                    code, safe_name(code)
+                )
+                if batch_id:
+                    record["batch_id"] = batch_id
+                    record["batch_counted"] = False
+                self._fail(record, f"{type(error).__name__}: {error}")
+                with self._lock:
+                    self._tasks[code] = record
+            self._remove_queue_item(item)
+        return ok, failed
+
+    def _remove_queue_item(self, item: Dict[str, Any]) -> None:
+        """按对象身份移除一个队列条目。"""
+        with self._lock:
+            self._queue = [queued for queued in self._queue if queued is not item]
+
+    def _settle_batches(self) -> None:
+        """统计批次内的终态任务，全部结束时发一条汇总通知。"""
+        completed: List[Dict[str, Any]] = []
+        seen: set = set()
+        with self._lock:
+            for record in self._tasks.values():
+                batch_id = str(record.get("batch_id") or "")
+                if not batch_id or record.get("batch_counted"):
+                    continue
+                state = record.get("state")
+                if state not in TERMINAL_STATES:
+                    continue
+                record["batch_counted"] = True
+                batch = self._batches.get(batch_id)
+                if batch is None or batch.get("notified"):
+                    continue
+                if state in (STATE_ORGANIZED, STATE_MOVED):
+                    batch["done"] = int(batch.get("done") or 0) + 1
+                elif state == STATE_SKIPPED:
+                    batch["skipped"] = int(batch.get("skipped") or 0) + 1
+                else:
+                    batch["failed"] = int(batch.get("failed") or 0) + 1
+                    failures = batch.setdefault("failures", [])
+                    if len(failures) < 200:
+                        failures.append({
+                            "code": record.get("code") or "",
+                            "reason": record.get("message") or "",
+                        })
+                counted = (
+                    int(batch.get("done") or 0)
+                    + int(batch.get("failed") or 0)
+                    + int(batch.get("skipped") or 0)
+                )
+                if counted >= int(batch.get("total") or 0) and batch_id not in seen:
+                    seen.add(batch_id)
+                    completed.append(batch)
+        for batch in completed:
+            if self._notify_batch_summary(batch):
+                with self._lock:
+                    batch["notified"] = True
+                    batch["finished_at"] = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+
+    @staticmethod
+    def _short_reason(reason: Any) -> str:
+        """把多来源错误链压成一句可读的失败原因。"""
+        text = str(reason or "").strip()
+        text = re.sub(r"^[A-Za-z]+Error:\s*", "", text)
+        if "；" in text:
+            text = text.rsplit("；", 1)[-1]
+        text = re.sub(r"^JavBus：", "", text)
+        if len(text) > 60:
+            text = text[:60] + "…"
+        return text or "未知原因"
+
+    def _notify_batch_summary(self, batch: Dict[str, Any]) -> bool:
+        """发送一条批量任务汇总通知。"""
+        total = int(batch.get("total") or 0)
+        done = int(batch.get("done") or 0)
+        failed = int(batch.get("failed") or 0)
+        skipped = int(batch.get("skipped") or 0)
+        lines = [f"本次提交 {total} 条：完成 {done} 条，失败 {failed} 条"]
+        if skipped:
+            lines[0] += f"，跳过 {skipped} 条"
+        failures = [
+            item for item in (batch.get("failures") or [])
+            if isinstance(item, dict)
+        ]
+        if failures:
+            shown = failures[:BATCH_FAILURE_DISPLAY]
+            detail = "；".join(
+                f"{item.get('code') or '未知'}（{self._short_reason(item.get('reason'))}）"
+                for item in shown
+            )
+            if len(failures) > len(shown):
+                detail += f"；等 {len(failures)} 条"
+            lines.append("失败：" + detail)
+        try:
+            self.post_message(
+                mtype=MessageType.Plugin,
+                title=f"番号云下载批量完成：{total} 条",
+                text="\n".join(lines),
+            )
+            logger.info(
+                f"番号云下载批次完成 {batch.get('id')}："
+                f"提交 {total}，完成 {done}，失败 {failed}，跳过 {skipped}"
+            )
+            return True
+        except Exception as error:
+            logger.warning(f"番号云下载批量汇总发送失败：{error}")
+            return False
+
     def advance_tasks(self, minutes: int = 0) -> str:
         """
         定时推进所有进行中的任务。
@@ -1649,15 +1995,28 @@ class JavCloudDownload(_PluginBase):
         if not self._enabled:
             return "插件未启用"
         if not _ADVANCE_LOCK.acquire(blocking=False):
+            logger.debug("番号云下载上一轮任务推进尚未结束，跳过本轮")
             return "上一轮任务推进尚未结束"
         try:
+            queued_ok, queued_failed = self._drain_queue(QUEUE_BATCH)
             with self._lock:
                 pending = [r for r in self._tasks.values() if r.get("state") in ACTIVE_STATES]
             if not pending:
+                self._settle_batches()
+                self._persist()
+                if queued_ok or queued_failed:
+                    summary = (
+                        f"队列处理 {queued_ok + queued_failed} 条："
+                        f"成功 {queued_ok}，失败 {queued_failed}"
+                    )
+                    logger.info(f"番号云下载 {summary}")
+                    return summary
+                logger.debug("番号云下载：队列为空，没有待推进的任务")
                 return "没有待推进的任务"
-            client = self._client()
+            client = None
             done = failed = 0
             try:
+                client = self._client()
                 folders = {
                     record.get("folder") or self._download_dir
                     for record in pending
@@ -1695,9 +2054,16 @@ class JavCloudDownload(_PluginBase):
                         self._stamp(record)
                         failed += 1
             finally:
-                client.close()
+                if client is not None:
+                    client.close()
+                self._settle_batches()
                 self._persist()
             summary = f"推进 {len(pending)} 条：完成 {done}，失败 {failed}"
+            if queued_ok or queued_failed:
+                summary = (
+                    f"队列提交 {queued_ok + queued_failed} 条"
+                    f"（成功 {queued_ok}，失败 {queued_failed}）；{summary}"
+                )
             logger.info(f"番号云下载 {summary}")
             return summary
         finally:
@@ -1857,12 +2223,27 @@ class JavCloudDownload(_PluginBase):
         )
 
     def api_tasks(self) -> Dict[str, Any]:
-        """返回任务记录。"""
+        """返回任务记录与待提交队列。"""
         with self._lock:
             items = sorted(
                 self._tasks.values(), key=lambda r: r.get("updated_at", ""), reverse=True
             )
-        return {"ok": True, "total": len(items), "items": items}
+            queued = [
+                {
+                    "code": item.get("code"),
+                    "batch_id": item.get("batch_id"),
+                    "added_at": item.get("added_at"),
+                    "position": index + 1,
+                }
+                for index, item in enumerate(self._queue)
+            ]
+        return {
+            "ok": True,
+            "total": len(items),
+            "items": items,
+            "queued_count": len(queued),
+            "queued": queued,
+        }
 
     def api_proactive(self) -> Dict[str, Any]:
         """返回主动洗版记录。"""
@@ -2152,9 +2533,9 @@ class JavCloudDownload(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "min_video_size_mb",
-                                            "label": "小视频阈值（MB）",
+                                            "label": "候选最小体积（MB）",
                                             "type": "number",
-                                            "hint": "小于该体积的视频视为垃圾，默认 300MB",
+                                            "hint": "小于该体积的磁力候选不下载，默认 2048MB（2GB）",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -2483,8 +2864,8 @@ class JavCloudDownload(_PluginBase):
                         "props": {"type": "info", "variant": "tonal"},
                         "text": "数据源：JavBus 直连可用；JavRanking 读取本地缓存，"
                                 "缺少磁力时按需抓取详情页，失败回退旧缓存。"
-                                "选种顺序：中文字幕（体积需达到最大候选一半）> 4K（≥5GB）> 体积最大；"
-                                "无码破解、假4K、720P/480P 与小于阈值的小视频默认排除；"
+                                "选种顺序：4K > 2K > 1080P > 720P，同档中字优先、再按体积；"
+                                "无码破解、AI拉伸/修复、假4K、480P 与小于 2GB 的候选默认排除；"
                                 "洗版时低于 720P 自动换种。"
                                 "任务由定时服务异步推进。",
                     },
@@ -2501,7 +2882,7 @@ class JavCloudDownload(_PluginBase):
             "replace_existing": True,
             "proactive_upgrade": False,
             "enable_filter_rules": True,
-            "min_video_size_mb": 300,
+            "min_video_size_mb": 2048,
             "source_base": "https://www.javbus.com",
             "cd2_host": "",
             "cd2_port": 19798,
@@ -2527,6 +2908,7 @@ class JavCloudDownload(_PluginBase):
             items = sorted(
                 self._tasks.values(), key=lambda r: r.get("updated_at", ""), reverse=True
             )[:10]
+            queued_count = len(self._queue)
         lines = [
             f"{r.get('code')}｜{r.get('state')}｜{r.get('percent', 0)}%｜{r.get('message') or ''}"
             for r in items
@@ -2578,6 +2960,14 @@ class JavCloudDownload(_PluginBase):
                     "component": "VAlert",
                     "props": {"type": "warning", "variant": "tonal"},
                     "text": proactive_text,
+                }
+            )
+        if queued_count:
+            pages.append(
+                {
+                    "component": "VAlert",
+                    "props": {"type": "info", "variant": "tonal"},
+                    "text": f"待提交队列：{queued_count} 条",
                 }
             )
         if lines:

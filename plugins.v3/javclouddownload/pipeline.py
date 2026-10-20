@@ -14,11 +14,12 @@ from typing import Any, Dict, List, Optional
 from app.sdk.logging import logger
 
 from .cd2 import Cd2Client, Cd2Error, status_name
-from .selector import DEFAULT_MIN_VIDEO_SIZE, pick_video, select
+from .selector import DEFAULT_MIN_MAGNET_SIZE, DEFAULT_MIN_VIDEO_SIZE, pick_video, select
 from .source import JavBusSource, info_hash_of, normalize_code
 
 # 任务状态
 STATE_PENDING = "pending"
+STATE_QUEUED = "queued"
 STATE_SUBMITTED = "submitted"
 STATE_DOWNLOADING = "downloading"
 STATE_FINISHED = "finished"
@@ -28,6 +29,7 @@ STATE_SKIPPED = "skipped"
 STATE_FAILED = "failed"
 
 ACTIVE_STATES = (STATE_PENDING, STATE_SUBMITTED, STATE_DOWNLOADING, STATE_FINISHED)
+TERMINAL_STATES = (STATE_ORGANIZED, STATE_MOVED, STATE_SKIPPED, STATE_FAILED)
 
 # 整理目录名时的非法字符
 INVALID_NAME_CHARS = re.compile(r'[\\/:*?"<>|]')
@@ -594,7 +596,7 @@ def run_once(
     move_target: str = "",
     delete_junk_only: bool = True,
     enable_filter_rules: bool = True,
-    min_video_size: int = DEFAULT_MIN_VIDEO_SIZE,
+    min_video_size: int = DEFAULT_MIN_MAGNET_SIZE,
     dry_run: bool = False,
     should_stop=None,
 ) -> Dict[str, Any]:
@@ -688,7 +690,8 @@ def run_once(
         cd2, target_dir, target_name,
         delete_junk_only=delete_junk_only,
         enable_filter_rules=enable_filter_rules,
-        min_video_size=min_video_size,
+        # 整理阶段仍用 300MB 的小视频阈值，候选最小体积只管选种
+        min_video_size=DEFAULT_MIN_VIDEO_SIZE,
     )
     result["tidy"] = tidied
     if not tidied.get("ok"):

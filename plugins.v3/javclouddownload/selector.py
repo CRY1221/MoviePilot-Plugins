@@ -2,18 +2,21 @@
 磁力候选的筛选与排序规则。
 
 排序优先级（从高到低）：
-1. 中文字幕（``-C`` / ``_CH`` / ``中字`` / ``字幕``），且体积不低于最大候选的一半；
-2. 明确的 4K / UHD / 2160P / 2160I，且体积不小于 5GB；
-3. 其余。
+1. 分辨率：4K（4K/UHD/2160P）> 2K（2K/QHD/1440P）> 1080P > 720P；
+   名称里看不出分辨率的候选与 1080P 同档；
+2. 同一档内优先中文字幕（``-C`` / ``_CH`` / ``中字`` / ``字幕``）；
+3. 同一档、同一字幕条件内按体积从大到小。
 
 硬性排除（列出即出局）：
-- 无码破解 ``-U`` / ``-UC`` / ``uncensored``；
-- 假 4K：标了 4K/UHD/2160P/2160I，但体积小于 5GB；
-- 720P / 720I；
+- 无码破解：``-U`` / ``-UC`` / ``uncensored`` / ``leaked`` / ``無修正`` / ``无码`` / ``破解``；
+- AI 拉伸或修复：独立 ``AI`` 标记 / ``AI高画質リマスター`` / ``4Kリマスター版`` /
+  ``Upscale`` / ``修复版`` / ``超分`` / ``补帧`` 等；
+- 假 4K：标了 4K/UHD/2160P，但体积小于 5GB；
 - 480P / 360P 及以下；
+- 体积小于 2GB 的候选（可在插件设置里覆盖）；
 - 广告或非视频资源（命名含推广域名、纯压缩包等）。
 
-同一档内按体积从大到小取；不把分辨率标签当作主要质量依据。
+720P 不再直接排除，只在分辨率排序里排最后。
 """
 
 from __future__ import annotations
@@ -26,26 +29,53 @@ UHD_PATTERN = re.compile(
     r"(?:^|[\s._\-\[@])(?:4K|UHD|2160P|2160I)(?:$|[\s._\-\]@])", re.I
 )
 
+# 2K 标志
+K2_PATTERN = re.compile(
+    r"(?:^|[\s._\-\[@])(?:2K|QHD|1440P|1440I)(?:$|[\s._\-\]@])", re.I
+)
+
+# 1080P 标志
+FHD_PATTERN = re.compile(
+    r"(?:^|[\s._\-\[@])(?:1080P|1080I|FHD)(?:$|[\s._\-\]@])", re.I
+)
+
 # 低于该体积的 4K 视为假 4K
 UHD_MIN_SIZE = 5 * 1024 ** 3
 
-# 明确标注 720P 的资源直接排除
+# 明确标注 720P 的资源排在最后一档
 RES_720_PATTERN = re.compile(r"(?:^|[\s._\-])(?:720P|720I)(?:$|[\s._\-])", re.I)
 
 # 明确标注 480P/360P 及以下的资源直接排除
 RES_LOW_PATTERN = re.compile(
-    r"(?:^|[\s._\-])(?:480P|480I|360P|360I)(?:$|[\s._\-])", re.I
+    r"(?:^|[\s._\-])(?:480P|480I|360P|360I|240P|240I)(?:$|[\s._\-])", re.I
 )
 
-# 小于该体积的视频视为垃圾；可在插件设置里覆盖
+# AI 拉伸 / 修复 / 放大：标了这些的视为假高清
+# 实测名称：AI高画質リマスター、4Kリマスター版、.AI.、4K60FPS
+AI_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])AI(?![A-Za-z0-9])"          # 独立 AI 标记：.AI. / [AI] / -AI
+    r"|リマスター|Remaster(?:ed)?"
+    r"|修复版|高清修复|4K修复|超分|补帧|插帧"
+    r"|Upscal(?:e|ed|ing)?|アップスケール",
+    re.I,
+)
+
+# 小于该体积的视频文件视为垃圾，用于整理阶段；可在插件设置里单独调整
 DEFAULT_MIN_VIDEO_SIZE = 300 * 1024 ** 2
+
+# 小于该体积的磁力候选直接不下载（默认 2GB）
+DEFAULT_MIN_MAGNET_SIZE = 2 * 1024 ** 3
 
 # 中文字幕标志
 CHS_PATTERN = re.compile(r"(?:^|[\s._\-])(?:C|CH|CHS|CHT)(?:$|[\s._\-])|中字|字幕|中文字幕", re.I)
 
 # 无码破解（需要排除）
+# 实测名称：-UC / -U.torrent / 无码破解 / (破解) / [Uncensored] /
+#          (無修正-流出) / (無修正-漏れ) / Uncensored Leaked / 無碼流出
 UNCENSORED_PATTERN = re.compile(
-    r"(?:^|[\s._\-])(?:UC|U|uncensored|unc)(?:$|[\s._\-])|無碼|无码|破解", re.I
+    r"(?:^|[\s._\-\[(])(?:UC|U|uncensored|uncen|unc|leaked|leak)(?:$|[\s._\-\])])"
+    r"|無碼|无码|無修正|无修正|破解|無碼流出|无码流出|モザイク破壊|リーク",
+    re.I,
 )
 
 # 广告或非视频资源
@@ -59,6 +89,9 @@ VIDEO_EXT = {
     ".mp4", ".mkv", ".avi", ".wmv", ".ts", ".m2ts", ".mov",
     ".flv", ".rmvb", ".rm", ".mpg", ".mpeg", ".webm",
 }
+
+# 分辨率档位，数值越小越优先；未标分辨率按 1080P 档处理
+TIER_4K, TIER_2K, TIER_1080, TIER_720 = 0, 1, 2, 3
 
 
 def is_uhd(name: str, size_bytes: int = 0) -> bool:
@@ -90,6 +123,26 @@ def is_fake_uhd(name: str, size_bytes: int = 0) -> bool:
     return 0 < size < UHD_MIN_SIZE
 
 
+def is_2k(name: str) -> bool:
+    """
+    判断是否明确标注 2K/1440P。
+
+    :param name: 磁力名称
+    :return: 命中返回 True
+    """
+    return bool(K2_PATTERN.search(name or ""))
+
+
+def is_1080p(name: str) -> bool:
+    """
+    判断是否明确标注 1080P/FHD。
+
+    :param name: 磁力名称
+    :return: 命中返回 True
+    """
+    return bool(FHD_PATTERN.search(name or ""))
+
+
 def is_720p(name: str) -> bool:
     """
     判断是否明确标注 720P/720I。
@@ -108,6 +161,16 @@ def is_low_res(name: str) -> bool:
     :return: 命中返回 True
     """
     return bool(RES_LOW_PATTERN.search(name or ""))
+
+
+def is_ai_upscaled(name: str) -> bool:
+    """
+    判断是否为 AI 拉伸 / 修复 / 放大的资源。
+
+    :param name: 磁力名称
+    :return: 命中返回 True
+    """
+    return bool(AI_PATTERN.search(name or ""))
 
 
 def has_chinese_sub(name: str) -> bool:
@@ -142,28 +205,61 @@ def is_junk(name: str) -> bool:
     return bool(JUNK_PATTERN.search(name or ""))
 
 
+def resolution_tier(name: str) -> int:
+    """
+    返回候选的分辨率档位，数值越小越优先。
+
+    名称里看不出分辨率的按 1080P 档处理。
+
+    :param name: 磁力名称
+    :return: 档位编号
+    """
+    text = name or ""
+    if UHD_PATTERN.search(text):
+        return TIER_4K
+    if K2_PATTERN.search(text):
+        return TIER_2K
+    if FHD_PATTERN.search(text):
+        return TIER_1080
+    if RES_720_PATTERN.search(text):
+        return TIER_720
+    return TIER_1080
+
+
+def resolution_label(name: str) -> str:
+    """
+    返回用于展示的分辨率标签。
+
+    :param name: 磁力名称
+    :return: 4K/2K/1080P/720P/未标分辨率
+    """
+    text = name or ""
+    if UHD_PATTERN.search(text):
+        return "4K"
+    if K2_PATTERN.search(text):
+        return "2K"
+    if FHD_PATTERN.search(text):
+        return "1080P"
+    if RES_720_PATTERN.search(text):
+        return "720P"
+    return "未标分辨率"
+
+
 def rank(magnet: Dict[str, Any], max_size: int = 0) -> tuple:
     """
     计算候选排序键（数值越小越优先）。
 
-    中文字幕只在体积达到最大候选一半时进入第一档；否则按体积与其它候选竞争。
+    分辨率优先，同档内中文字幕优先，再按体积从大到小。
 
     :param magnet: 磁力条目
-    :param max_size: 过滤后候选中的最大体积
+    :param max_size: 兼容旧调用，已不参与排序
     :return: 可直接用于 sorted 的元组
     """
     name = magnet.get("name") or ""
     size_bytes = int(magnet.get("size_bytes") or 0)
-    if has_chinese_sub(name) and (
-        not max_size or size_bytes >= int(max_size * 0.5)
-    ):
-        tier = 0
-    elif is_uhd(name, size_bytes):
-        tier = 1
-    else:
-        tier = 2
+    sub_rank = 0 if has_chinese_sub(name) else 1
     # 同档内体积大的优先，因此体积取负值
-    return (tier, -size_bytes)
+    return (resolution_tier(name), sub_rank, -size_bytes)
 
 
 def select(
@@ -171,7 +267,7 @@ def select(
     allow_uncensored: bool = False,
     allow_junk: bool = False,
     enable_rules: bool = True,
-    min_video_size: int = DEFAULT_MIN_VIDEO_SIZE,
+    min_video_size: int = DEFAULT_MIN_MAGNET_SIZE,
 ) -> Dict[str, Any]:
     """
     从候选列表中选出最佳磁力。
@@ -215,10 +311,10 @@ def select(
         reason = None
         if not allow_uncensored and is_uncensored(name):
             reason = "无码破解"
+        elif is_ai_upscaled(name):
+            reason = "AI拉伸/修复"
         elif is_fake_uhd(name, size_bytes):
             reason = "假4K（小于5GB）"
-        elif is_720p(name):
-            reason = "720P"
         elif is_low_res(name):
             reason = "480P/360P"
         elif 0 < size_bytes < min_size:
@@ -239,17 +335,12 @@ def select(
             "total": len(magnets),
         }
 
-    max_size = max(int(item.get("size_bytes") or 0) for item in candidates)
-    ordered = sorted(candidates, key=lambda item: rank(item, max_size))
+    ordered = sorted(candidates, key=rank)
     chosen = ordered[0]
     name = chosen.get("name") or ""
-    size_bytes = int(chosen.get("size_bytes") or 0)
-    if has_chinese_sub(name) and size_bytes >= int(max_size * 0.5):
-        tier = "中文字幕"
-    elif is_uhd(name, size_bytes):
-        tier = "4K"
-    else:
-        tier = "体积最大"
+    tier = resolution_label(name)
+    if has_chinese_sub(name):
+        tier = f"{tier}（中字）"
     return {
         "ok": True,
         "chosen": chosen,

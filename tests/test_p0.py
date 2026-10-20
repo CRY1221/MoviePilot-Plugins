@@ -1188,7 +1188,7 @@ check("Emby 低清扫描：同番号取最高版本",
 media_library.EmbyLibrary._services = _original_services
 
 
-# ---------- 选种规则：4K 门槛、中字优先、720P ----------
+# ---------- 选种规则：分辨率优先、同档中字优先、体积兜底 ----------
 
 def _magnet(name, gb):
     return {"name": name, "size_text": f"{gb}GB", "size_bytes": int(gb * GB),
@@ -1202,37 +1202,76 @@ check("4K 门槛：4K 与 2160P 同档",
       selector.rank(_magnet("X 4K", 6)) == selector.rank(_magnet("X 2160P", 6)))
 check("6K 不作 4K 判断", selector.is_uhd("X 6K", 6 * GB) is False)
 
+check("分辨率排序：4K 先于 2K",
+      selector.rank(_magnet("X 2160P", 6)) < selector.rank(_magnet("X 1440P", 6)))
+check("分辨率排序：2K 先于 1080P",
+      selector.rank(_magnet("X 1440P", 6)) < selector.rank(_magnet("X 1080P", 6)))
+check("分辨率排序：1080P 先于 720P",
+      selector.rank(_magnet("X 1080P", 6)) < selector.rank(_magnet("X 720P", 6)))
+check("未标分辨率与 1080P 同档",
+      selector.resolution_tier("X 6GB") == selector.resolution_tier("X 1080P"))
+check("未标分辨率按体积比较",
+      selector.rank(_magnet("X 10GB", 10)) < selector.rank(_magnet("X 5GB", 5)))
+
 picked = selector.select([_magnet("X 2160P 4GB", 4), _magnet("X-C 1080p", 6)])
 check("假4K被排除", (picked.get("chosen") or {}).get("name") == "X-C 1080p", str(picked))
 check("假4K记录原因", any(x.get("reason", "").startswith("假4K") for x in picked.get("excluded", [])), str(picked.get("excluded")))
 
-picked = selector.select([_magnet("X 2160P 6GB", 6), _magnet("X-C 5GB", 5)])
-check("中字优先于2160P", (picked.get("chosen") or {}).get("name") == "X-C 5GB", str(picked))
+picked = selector.select([_magnet("X 2160P 6GB", 6), _magnet("X-C 1080p 5GB", 5)])
+check("4K优先于1080P中字", (picked.get("chosen") or {}).get("name") == "X 2160P 6GB", str(picked))
+check("4K档位标记", picked.get("tier") == "4K", str(picked))
 
-picked = selector.select([_magnet("X 2160P 6GB", 6), _magnet("X 10GB", 10)])
-check("2160P优先于普通大体积", (picked.get("chosen") or {}).get("name") == "X 2160P 6GB", str(picked))
+picked = selector.select([_magnet("X 1440P 6GB", 6), _magnet("X 1080P 8GB", 8)])
+check("2K优先于1080P", (picked.get("chosen") or {}).get("name") == "X 1440P 6GB", str(picked))
 
-picked = selector.select([_magnet("X 720P 10GB", 10), _magnet("X 5GB", 5)])
-check("720P被排除", (picked.get("chosen") or {}).get("name") == "X 5GB", str(picked))
-check("720P记录原因", any(x.get("reason") == "720P" for x in picked.get("excluded", [])), str(picked.get("excluded")))
+picked = selector.select([_magnet("X-C 1080p 5GB", 5), _magnet("X 1080P 8GB", 8)])
+check("同档中字优先", (picked.get("chosen") or {}).get("name") == "X-C 1080p 5GB", str(picked))
+check("中字档位标记", picked.get("tier") == "1080P（中字）", str(picked))
+
+picked = selector.select([_magnet("X 1080P 3GB", 3), _magnet("X 720P 10GB", 10)])
+check("720P排在1080P之后", (picked.get("chosen") or {}).get("name") == "X 1080P 3GB", str(picked))
+
+picked = selector.select([_magnet("X 720P 6GB", 6)])
+check("720P不再直接排除", (picked.get("chosen") or {}).get("name") == "X 720P 6GB", str(picked))
 
 picked = selector.select([_magnet("X 480P 10GB", 10), _magnet("X 5GB", 5)])
 check("480P被排除", (picked.get("chosen") or {}).get("name") == "X 5GB", str(picked))
 check("480P记录原因", any(x.get("reason") == "480P/360P" for x in picked.get("excluded", [])), str(picked.get("excluded")))
 
-picked = selector.select([_magnet("X-C 1GB", 1), _magnet("X 6GB", 6)])
-check("中字体积不足一半不优先", (picked.get("chosen") or {}).get("name") == "X 6GB", str(picked))
-check("中字体积不足一半不改档位", picked.get("tier") == "体积最大", str(picked))
+picked = selector.select([_magnet("X AI修复 2160P 8GB", 8), _magnet("X 1080P 6GB", 6)])
+check("AI修复被排除", (picked.get("chosen") or {}).get("name") == "X 1080P 6GB", str(picked))
+check("AI修复记录原因", any(x.get("reason") == "AI拉伸/修复" for x in picked.get("excluded", [])), str(picked.get("excluded")))
 
-picked = selector.select([_magnet("第一會所新片@SIS001@X 2GB", 2), _magnet("X 6GB", 6)])
+picked = selector.select([_magnet("X AI-Upscale 2160P 8GB", 8), _magnet("X 1080P 6GB", 6)])
+check("AI Upscale被排除", any(x.get("reason") == "AI拉伸/修复" for x in picked.get("excluded", [])), str(picked.get("excluded")))
+
+# 关键词来自 2026-10-20 实际抓取的磁力名称
+check("无码：-UC 识别", selector.is_uncensored("SSNI-674-UC.torrent"))
+check("无码：-U 识别", selector.is_uncensored("IPX-177-U.torrent.无码破解"))
+check("无码：無修正-流出", selector.is_uncensored("(無修正-流出) ABP-664 (Uncensored Leaked)"))
+check("无码：[Uncensored]", selector.is_uncensored("[JAV] [Uncensored] MKBD-S127 [1080p]"))
+check("无码：Uncensored Leaked", selector.is_uncensored("FC2 PPV 238629 (Uncensored Leaked)"))
+check("无码：无码破解", selector.is_uncensored("SSNI-674-UC.torrent.无码破解"))
+check("无码：不误伤 FUCK", selector.is_uncensored("SDMS-993 - FUCK-1 Japan Grand Prix") is False)
+check("AI：AI高画质リマスター", selector.is_ai_upscaled("RCON-016 【AI高画質リマスター】"))
+check("AI：4Kリマスター版", selector.is_ai_upscaled("KUFD-068 【4Kリマスター版】"))
+check("AI：独立 .AI. 标记", selector.is_ai_upscaled("ABP-664 あやみ旬果.AI.泡姬.4k.x265"))
+check("AI：60fps 不算 AI", selector.is_ai_upscaled("MIDA-473_4K60FPS") is False)
+check("AI：AIR 不误伤", selector.is_ai_upscaled("STAR-413 欲情AIR LINE 麻生希") is False)
+
+picked = selector.select([_magnet("X 1080P 1.5GB", 1.5), _magnet("X 1080P 6GB", 6)])
+check("小于2GB被排除", (picked.get("chosen") or {}).get("name") == "X 1080P 6GB", str(picked))
+check("小于2GB记录原因", any("小于2048MB" in x.get("reason", "") for x in picked.get("excluded", [])), str(picked.get("excluded")))
+
+picked = selector.select([_magnet("第一會所新片@SIS001@X 4GB", 4), _magnet("X 6GB", 6)])
 check("来源标签不再优先", (picked.get("chosen") or {}).get("name") == "X 6GB", str(picked))
-check("来源标签不再改档位", picked.get("tier") == "体积最大", str(picked))
+check("来源标签不再改档位", picked.get("tier") == "未标分辨率", str(picked))
 
 # ---------- 小视频阈值与规则开关 ----------
 
 picked = selector.select([_magnet("X 200MB", 0.2), _magnet("X 5GB", 5)])
-check("小于300MB的候选被排除", (picked.get("chosen") or {}).get("name") == "X 5GB", str(picked))
-check("小视频记录原因", any("小于300MB" in x.get("reason", "") for x in picked.get("excluded", [])), str(picked.get("excluded")))
+check("小于2GB的候选被排除", (picked.get("chosen") or {}).get("name") == "X 5GB", str(picked))
+check("小视频记录原因", any("小于2048MB" in x.get("reason", "") for x in picked.get("excluded", [])), str(picked.get("excluded")))
 
 picked = selector.select([_magnet("X-UC 10GB", 10), _magnet("X-C 5GB", 5)], enable_rules=False)
 check("规则关闭：直接按体积最大", (picked.get("chosen") or {}).get("name") == "X-UC 10GB", str(picked))
@@ -1301,6 +1340,23 @@ try:
 except jcd.JavRankingError:
     check("缓存：未知番号报错", True)
 
+_original_fetch_page = jcd.JavRankingSource._fetch_page
+
+
+def _raise_fetch_page(self, url):
+    raise jcd.JavRankingError("请求 JavRanking 失败：HTTP 403")
+
+
+jcd.JavRankingSource._fetch_page = _raise_fetch_page
+try:
+    try:
+        jr.fetch_remote_detail("START-257")
+        check("JavRanking：抓取失败不再用旧缓存兜底", False)
+    except jcd.JavRankingError:
+        check("JavRanking：抓取失败不再用旧缓存兜底", True)
+finally:
+    jcd.JavRankingSource._fetch_page = _original_fetch_page
+
 _orig_remote = jcd.JavRankingSource.fetch_remote_detail
 jcd.JavRankingSource.fetch_remote_detail = lambda self, code: self.fetch_detail(code)
 
@@ -1311,7 +1367,7 @@ inst3._javranking_dir = str(CACHE)
 inst3._allow_uncensored = False
 inst3._allow_junk = False
 preview = inst3.preview("START-257")
-check("数据源：javranking 选种", preview.get("source") == "javranking" and preview.get("tier") == "中文字幕", str(preview))
+check("数据源：javranking 选种", preview.get("source") == "javranking" and preview.get("tier") == "未标分辨率（中字）", str(preview))
 check("数据源：排除 UC 后选中 -C", (preview.get("chosen") or {}).get("name") == "START-257-C.torrent", str(preview.get("chosen")))
 
 try:
@@ -1380,6 +1436,296 @@ try:
     check("数据源：auto 无磁力回退 JavBus", fallback.get("source") == "javbus", str(fallback))
 finally:
     jcd.source.JavBusSource.fetch_detail = original
+
+# ---------- 待提交队列与批量汇总 ----------
+
+queue_obj = _retry_instance()
+queue_obj._enabled = True
+queue_obj.preview = lambda code: {
+    "code": code, "tier": "中文字幕", "chosen": cands[0], "candidates": cands,
+}
+queue_client = _FakeClient({}, set())
+queue_obj._client = lambda: queue_client
+
+enqueued = queue_obj.enqueue(["Q-001", "Q-002", "Q-001"])
+check("队列：入队去重并创建批次",
+      enqueued.get("ok") and enqueued.get("queued") == 2
+      and enqueued.get("queue_size") == 2
+      and "已添加至队列" in enqueued.get("message", ""),
+      str(enqueued))
+check("队列：持久化队列与批次",
+      len(queue_obj.get_data("queue") or []) == 2
+      and len(queue_obj.get_data("batches") or {}) == 1,
+      str(queue_obj.get_data("queue")))
+
+queue_summary = queue_obj.advance_tasks()
+check("队列：定时服务消费队列",
+      len(queue_obj._queue) == 0 and len(queue_client.added) == 2,
+      f"{queue_summary} | {queue_client.added}")
+check("队列：提交记录带批次号",
+      all(record.get("batch_id") for record in queue_obj._tasks.values()),
+      str(queue_obj._tasks))
+
+with queue_obj._lock:
+    queue_obj._tasks["Q-001"].update({"state": jcd.STATE_ORGANIZED})
+    queue_obj._tasks["Q-002"].update({
+        "state": jcd.STATE_FAILED,
+        "message": "测试失败原因",
+    })
+queue_obj._settle_batches()
+batch_messages = [
+    message for message in queue_obj.messages
+    if "批量完成" in str(message.get("title") or "")
+]
+check("队列：批次完成只发一条汇总",
+      len(batch_messages) == 1,
+      str(batch_messages))
+check("队列：汇总包含提交/完成/失败与失败番号",
+      batch_messages
+      and "提交 2 条" in batch_messages[0].get("text", "")
+      and "完成 1 条" in batch_messages[0].get("text", "")
+      and "失败 1 条" in batch_messages[0].get("text", "")
+      and "Q-002" in batch_messages[0].get("text", ""),
+      str(batch_messages))
+queue_obj._settle_batches()
+batch_messages_again = [
+    message for message in queue_obj.messages
+    if "批量完成" in str(message.get("title") or "")
+]
+check("队列：批次只通知一次",
+      len(batch_messages_again) == 1,
+      str(batch_messages_again))
+check("队列：失败原因取最后一段来源",
+      queue_obj._short_reason(
+          "JavBusError: JavRanking：抓取失败；JavBus：站内未搜到番号 X"
+      ) == "站内未搜到番号 X",
+      queue_obj._short_reason(
+          "JavBusError: JavRanking：抓取失败；JavBus：站内未搜到番号 X"
+      ))
+
+limited = _retry_instance()
+limited._enabled = True
+_original_max_queue = jcd.MAX_QUEUE
+jcd.MAX_QUEUE = 2
+try:
+    first = limited.enqueue(["L-001", "L-002"])
+    second = limited.enqueue(["L-003"])
+    check("队列：超过上限整批拒绝",
+          first.get("ok") and not second.get("ok")
+          and "队列已满" in second.get("reason", ""),
+          f"{first} | {second}")
+finally:
+    jcd.MAX_QUEUE = _original_max_queue
+
+check("队列：注册智能体工具入口",
+      callable(getattr(jcd.JavCloudDownload, "get_agent_tools", None)))
+
+trim_obj = _retry_instance()
+for index in range(jcd.MAX_RECORDS + 20):
+    record = trim_obj._new_record(f"OLD-{index}", f"OLD-{index}")
+    record.update({
+        "state": jcd.STATE_ORGANIZED,
+        "updated_at": f"2026-10-01 00:00:{index % 60:02d}",
+    })
+    trim_obj._tasks[record["code"]] = record
+active_record = trim_obj._new_record("KEEP-1", "KEEP-1")
+active_record["state"] = jcd.STATE_DOWNLOADING
+trim_obj._tasks["KEEP-1"] = active_record
+unsettled_record = trim_obj._new_record("BATCH-KEEP", "BATCH-KEEP")
+unsettled_record.update({
+    "state": jcd.STATE_FAILED,
+    "batch_id": "batch-x",
+    "batch_counted": False,
+})
+trim_obj._tasks["BATCH-KEEP"] = unsettled_record
+trim_obj._persist()
+check("任务裁剪：保留进行中与未结算批次",
+      "KEEP-1" in trim_obj._tasks and "BATCH-KEEP" in trim_obj._tasks,
+      str(len(trim_obj._tasks)))
+check("任务裁剪：历史记录仍受上限约束",
+      len(trim_obj._tasks) <= jcd.MAX_RECORDS + 2,
+      str(len(trim_obj._tasks)))
+
+# ---------- JavRanking 不可用时的回退 ----------
+
+ranking_obj = _retry_instance()
+ranking_obj._use_javranking = True
+ranking_obj._use_javbus = False
+ranking_obj._javranking_dir = str(CACHE)
+
+_original_ranking = jcd.javranking.JavRankingSource.fetch_remote_detail
+_original_bus = jcd.source.JavBusSource.fetch_detail
+
+
+def _raise_ranking(self, code):
+    raise jcd.javranking.JavRankingError("请求 JavRanking 失败：403")
+
+
+def _fake_bus(self, code):
+    return {
+        "code": code, "title": "JavBus 兜底", "release_date": "", "duration": "",
+        "detail_url": "",
+        "magnets": [{
+            "name": "T-C", "size_text": "1GB", "size_bytes": 1, "date": "",
+            "magnet": "magnet:?xt=urn:btih:" + "e" * 40, "info_hash": "e" * 40,
+        }],
+    }
+
+
+jcd.javranking.JavRankingSource.fetch_remote_detail = _raise_ranking
+jcd.source.JavBusSource.fetch_detail = _fake_bus
+try:
+    fallback_detail = ranking_obj._fetch_detail("ABF-394")
+    check("JavRanking：只勾 JavRanking 时 403 自动回退 JavBus",
+          fallback_detail.get("source") == "javbus"
+          and bool(fallback_detail.get("magnets")),
+          str(fallback_detail))
+finally:
+    jcd.javranking.JavRankingSource.fetch_remote_detail = _original_ranking
+    jcd.source.JavBusSource.fetch_detail = _original_bus
+
+jcd.javranking._block_for(1)
+check("JavRanking：Cloudflare 冷却期生效",
+      jcd.javranking._blocked())
+jcd.javranking._reset_challenge()
+check("JavRanking：成功后重置冷却",
+      not jcd.javranking._blocked()
+      and jcd.javranking._challenge_streak == 0)
+
+first_cooldown = jcd.javranking._note_challenge()
+check("JavRanking：首次挑战冷却 60 秒", first_cooldown == 60, str(first_cooldown))
+jcd.javranking._block_until = 0.0
+second_cooldown = jcd.javranking._note_challenge()
+check("JavRanking：再次挑战升级到 300 秒",
+      second_cooldown == 300, str(second_cooldown))
+jcd.javranking._reset_challenge()
+
+class _FakeResponse:
+    def __init__(self, status, text="", headers=None):
+        self.status_code = status
+        self.text = text
+        self.content = text.encode()
+        self.headers = headers or {}
+
+
+class _FakeHttp:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+        self.seen = []
+
+    def request(self, *args, **kwargs):
+        self.seen.append(kwargs)
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
+
+    def close(self):
+        pass
+
+
+_original_request_utils = jcd.javranking.RequestUtils
+_original_throttle = jcd.javranking.throttle_wait
+_original_retry_delay = jcd.javranking.CHALLENGE_RETRY_SECONDS
+try:
+    jcd.javranking.throttle_wait = lambda *args, **kwargs: None
+    jcd.javranking.CHALLENGE_RETRY_SECONDS = 0
+    retry_http = _FakeHttp([
+        _FakeResponse(403, headers={"cf-mitigated": "challenge"}),
+        _FakeResponse(200, text="<html>ok</html>"),
+    ])
+    jcd.javranking.RequestUtils = lambda **kwargs: retry_http
+    retried_text = jr._fetch_page("https://javranking.cc/zh-hans/videos/78/")
+    check("JavRanking：403 后等 5 秒重试并成功",
+          retried_text == "<html>ok</html>" and retry_http.calls == 2
+          and not jcd.javranking._blocked(),
+          f"calls={retry_http.calls}")
+
+    failed_http = _FakeHttp([
+        _FakeResponse(403, headers={"cf-mitigated": "challenge"}),
+        _FakeResponse(403, headers={"cf-mitigated": "challenge"}),
+    ])
+    jcd.javranking.RequestUtils = lambda **kwargs: failed_http
+    try:
+        jr._fetch_page("https://javranking.cc/zh-hans/videos/78/")
+        check("JavRanking：连续两次 403 进入冷却", False)
+    except jcd.javranking.JavRankingError:
+        check("JavRanking：连续两次 403 进入冷却",
+              jcd.javranking._blocked() and failed_http.calls == 2)
+
+    jcd.javranking._reset_challenge()
+    ticket_dir = Path(tempfile.mkdtemp(prefix="jr-ticket-"))
+    ticket_source = jcd.JavRankingSource(str(ticket_dir))
+    _original_mint = jcd.JavRankingSource._mint_ticket
+
+    def _fake_mint(self):
+        return {
+            "cookies": {"cf_clearance": "ticket-1"},
+            "ua": "TicketUA",
+            "created_at": time.time(),
+        }
+
+    detail_url = "https://javranking.cc/zh-hans/videos/78/"
+    try:
+        jcd.JavRankingSource._mint_ticket = _fake_mint
+        ticket_http = _FakeHttp([
+            _FakeResponse(403, headers={"cf-mitigated": "challenge"}),
+            _FakeResponse(403, headers={"cf-mitigated": "challenge"}),
+            _FakeResponse(200, text="ticket-ok"),
+        ])
+        jcd.javranking.RequestUtils = lambda **kwargs: ticket_http
+        ticket_text = ticket_source._fetch_page(detail_url)
+        check("JavRanking：取票后用 Cookie 请求成功",
+              ticket_text == "ticket-ok"
+              and ticket_http.calls == 3
+              and ticket_http.seen[-1].get("cookies")
+              == {"cf_clearance": "ticket-1"}
+              and ticket_http.seen[-1].get("headers", {}).get("User-Agent")
+              == "TicketUA",
+              f"calls={ticket_http.calls} seen={ticket_http.seen}")
+    finally:
+        jcd.JavRankingSource._mint_ticket = _original_mint
+
+    ticket_source._save_ticket({"cf_clearance": "ticket-2"}, "UA2")
+    reused_http = _FakeHttp([_FakeResponse(200, text="reused")])
+    jcd.javranking.RequestUtils = lambda **kwargs: reused_http
+    reused_text = ticket_source._fetch_page(detail_url)
+    check("JavRanking：已保存的通行票直接复用",
+          reused_text == "reused"
+          and reused_http.calls == 1
+          and reused_http.seen[0].get("cookies")
+          == {"cf_clearance": "ticket-2"}
+          and reused_http.seen[0].get("headers", {}).get("User-Agent")
+          == "UA2",
+          f"calls={reused_http.calls} seen={reused_http.seen}")
+finally:
+    jcd.javranking.RequestUtils = _original_request_utils
+    jcd.javranking.throttle_wait = _original_throttle
+    jcd.javranking.CHALLENGE_RETRY_SECONDS = _original_retry_delay
+    jcd.javranking._reset_challenge()
+
+# ---------- 无可用视频时换候选 ----------
+
+organize_client = _FakeClient({}, {"/dl/ABC-123"})
+organize_obj = _retry_instance()
+organize_record = _candidate_record(organize_obj, cands, index=0)
+organize_record["task_name"] = "ABC-123"
+organize_record["folder"] = "/dl"
+_original_tidy = jcd.tidy_dir
+jcd.tidy_dir = lambda *args, **kwargs: {
+    "ok": False,
+    "reason": "所有视频都小于 300MB",
+    "files": ["MEK_008.iso", "广告.txt"],
+}
+try:
+    organize_obj._organize(organize_client, organize_record)
+finally:
+    jcd.tidy_dir = _original_tidy
+check("整理：没有可用视频时直接换下一条候选",
+      organize_record.get("candidate_index") == 1
+      and organize_client.added
+      and organize_client.added[-1][0] == cands[1]["magnet"],
+      f"{organize_record.get('candidate_index')} {organize_client.added}")
 
 print("\nRESULT:", "ALL PASS" if not FAILURES else f"{len(FAILURES)} FAILED: {FAILURES}")
 sys.exit(1 if FAILURES else 0)
