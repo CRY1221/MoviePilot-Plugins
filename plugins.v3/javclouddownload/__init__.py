@@ -21,6 +21,7 @@ from app.sdk.logging import logger
 from app.schemas.types import MessageType
 
 from .cd2 import Cd2Client, Cd2Error, status_name
+from .javdb import JavDBError, JavDBSource
 from .javranking import JavRankingError, JavRankingSource
 from .library import (
     EmbyLibrary,
@@ -97,7 +98,7 @@ class JavCloudDownload(_PluginBase):
     plugin_name = "番号云下载"
     plugin_desc = "按番号从 JavBus 取种，经 CloudDrive2 云下载到 115，完成后清理、改名并可移动到库目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.9.0"
+    plugin_version = "0.9.1"
     plugin_label = "工具"
     plugin_author = "CRY1221"
     plugin_config_prefix = "javclouddownload_"
@@ -125,6 +126,8 @@ class JavCloudDownload(_PluginBase):
     _source_mode = "javbus"
     _use_javbus = True
     _use_javranking = False
+    _use_javdb = False
+    _javdb_cookie = ""
     _javranking_dir = ""
     _emby_library = ""
     _library_map = ""
@@ -159,15 +162,29 @@ class JavCloudDownload(_PluginBase):
         config = config or {}
         self._enabled = bool(config.get("enabled"))
         self._source_base = (config.get("source_base") or "https://www.javbus.com").strip()
-        if "use_javbus" in config or "use_javranking" in config:
+        if (
+            "use_javbus" in config
+            or "use_javranking" in config
+            or "use_javdb" in config
+        ):
             self._use_javbus = bool(config.get("use_javbus", True))
             self._use_javranking = bool(config.get("use_javranking", False))
+            self._use_javdb = bool(config.get("use_javdb", False))
         else:
             mode = (config.get("source_mode") or "javbus").strip().lower()
             self._use_javbus = mode in ("javbus", "auto")
             self._use_javranking = mode == "javranking"
-        if self._use_javbus and self._use_javranking:
+            self._use_javdb = mode == "javdb"
+        self._javdb_cookie = (config.get("javdb_cookie") or "").strip()
+        if self._use_javdb and not self._javdb_cookie:
+            logger.warning("已勾选 JavDB 但未填写 Cookie，该来源会取种失败")
+        selected = sum(
+            [self._use_javbus, self._use_javranking, self._use_javdb]
+        )
+        if selected > 1:
             self._source_mode = "auto"
+        elif self._use_javdb:
+            self._source_mode = "javdb"
         elif self._use_javranking:
             self._source_mode = "javranking"
         else:
@@ -904,6 +921,8 @@ class JavCloudDownload(_PluginBase):
             names.append("JavBus")
         if self._use_javranking:
             names.append("JavRanking")
+        if self._use_javdb:
+            names.append("JavDB")
         return "+".join(names) or "未选择"
 
     def _fetch_detail(self, code: str) -> Dict[str, Any]:
@@ -911,13 +930,14 @@ class JavCloudDownload(_PluginBase):
         按勾选的来源读取番号详情，合并磁力并按 infoHash 去重。
 
         JavRanking 勾选后，本地缓存没有磁力时会按需抓取详情页；
-        两个来源都勾选时，任一失败仍可使用另一个。
+        JavDB 需要配置 Cookie，磁力名称只有番号、没有分辨率；
+        多个来源勾选时，任一失败仍可使用其他来源。
 
         :param code: 番号
         :return: 详情字典
         """
         normalized = normalize_code(code)
-        if not self._use_javbus and not self._use_javranking:
+        if not self._use_javbus and not self._use_javranking and not self._use_javdb:
             raise JavBusError("未勾选任何种子来源")
         def load_ranking() -> Dict[str, Any]:
             return JavRankingSource(self._javranking_dir).fetch_remote_detail(
@@ -933,14 +953,23 @@ class JavCloudDownload(_PluginBase):
             finally:
                 source.close()
 
+        def load_javdb() -> Dict[str, Any]:
+            source = JavDBSource(cookie=self._javdb_cookie)
+            try:
+                return source.fetch_detail(normalized)
+            finally:
+                source.close()
+
         loaded: List[tuple] = []
         errors: List[str] = []
         futures = {}
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with ThreadPoolExecutor(max_workers=3) as pool:
             if self._use_javranking:
                 futures[pool.submit(load_ranking)] = "JavRanking"
             if self._use_javbus:
                 futures[pool.submit(load_javbus)] = "JavBus"
+            if self._use_javdb:
+                futures[pool.submit(load_javdb)] = "JavDB"
             for future in as_completed(futures):
                 name = futures[future]
                 try:
@@ -952,19 +981,19 @@ class JavCloudDownload(_PluginBase):
                     else:
                         logger.info(f"{name} 获取失败：{error}")
         if (
-            self._use_javranking
+            (self._use_javranking or self._use_javdb)
             and not self._use_javbus
             and not any(detail.get("magnets") for _, detail in loaded)
         ):
-            # Cloudflare 挑战下 JavRanking 直连不可用时，用 JavBus 兜底，
-            # 避免只勾 JavRanking 的配置完全下不了种。
-            logger.warning("JavRanking 不可用，自动回退 JavBus 取种")
+            # JavRanking / JavDB 都被 Cloudflare 拦下时，用 JavBus 兜底，
+            # 避免只勾这两个来源的配置完全下不了种。
+            logger.warning("JavRanking/JavDB 不可用，自动回退 JavBus 取种")
             try:
                 loaded.append(("JavBus", load_javbus()))
             except Exception as error:
                 errors.append(f"JavBus：{error}")
                 logger.warning(f"JavBus 回退失败：{error}")
-        loaded.sort(key=lambda item: 0 if item[0] == "JavRanking" else 1)
+        loaded.sort(key=lambda item: {"JavRanking": 0, "JavBus": 1}.get(item[0], 2))
         details = [detail for _, detail in loaded]
         if not details:
             raise JavBusError("；".join(errors) or f"{normalized} 没有可用来源")
@@ -2306,6 +2335,7 @@ class JavCloudDownload(_PluginBase):
                 "sites": {
                     "javbus": self._use_javbus,
                     "javranking": self._use_javranking,
+                    "javdb": self._use_javdb,
                 },
                 "sources": [
                     {
@@ -2318,6 +2348,11 @@ class JavCloudDownload(_PluginBase):
                         "available": bool(stats.get("available")),
                         "capabilities": ["metadata", "rankings", "magnets"],
                         "stats": stats,
+                    },
+                    {
+                        "name": "javdb",
+                        "available": bool(self._javdb_cookie),
+                        "capabilities": ["metadata", "magnets"],
                     },
                 ],
             },
@@ -2501,6 +2536,42 @@ class JavCloudDownload(_PluginBase):
                                             "model": "javranking_dir",
                                             "label": "JavRanking 缓存目录",
                                             "placeholder": "留空使用插件数据目录/javranking",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VCheckbox",
+                                        "props": {
+                                            "model": "use_javdb",
+                                            "label": "JavDB（需 Cookie）",
+                                            "hide-details": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 9},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "javdb_cookie",
+                                            "label": "JavDB Cookie",
+                                            "placeholder": "从浏览器复制整段 Cookie，必须包含 cf_clearance",
+                                            "rows": 2,
+                                            "hint": "只在取种请求里发送，不写日志；Cookie 失效会触发 Cloudflare 挑战，更新这里即可",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],
@@ -2863,7 +2934,9 @@ class JavCloudDownload(_PluginBase):
                         "component": "VAlert",
                         "props": {"type": "info", "variant": "tonal"},
                         "text": "数据源：JavBus 直连可用；JavRanking 读取本地缓存，"
-                                "缺少磁力时按需抓取详情页，失败回退旧缓存。"
+                                "缺少磁力时按需抓取详情页，失败回退旧缓存；"
+                                "JavDB 需要填写含 cf_clearance 的 Cookie，"
+                                "它的磁力名称只有番号、没有分辨率，按体积参与选种。"
                                 "选种顺序：4K > 2K > 1080P > 720P，同档中字优先、再按体积；"
                                 "无码破解、AI拉伸/修复、假4K、480P 与小于 2GB 的候选默认排除；"
                                 "洗版时低于 720P 自动换种。"
@@ -2875,6 +2948,8 @@ class JavCloudDownload(_PluginBase):
             "enabled": False,
             "use_javbus": True,
             "use_javranking": False,
+            "use_javdb": False,
+            "javdb_cookie": "",
             "javranking_dir": "",
             "emby_library": "",
             "library_map": "",

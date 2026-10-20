@@ -53,6 +53,10 @@ def normalize_code(value: str) -> str:
     """
     text = (value or "").strip()
     text = re.sub(r"\s+", "", text)
+    # FC2 统一成 FC2-PPV-xxxxxxx，否则会被通用规则拆成 FC-2-xxxxxxx
+    fc2 = re.match(r"^FC2[-_]*(?:PPV[-_]*)?(\d{5,8})$", text, re.I)
+    if fc2:
+        return f"FC2-PPV-{fc2.group(1)}"
     match = re.match(r"^([A-Za-z]+)[-_]?(\d.*)$", text)
     if match:
         return f"{match.group(1).upper()}-{match.group(2)}"

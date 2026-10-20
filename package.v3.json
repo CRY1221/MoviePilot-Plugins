@@ -1,13 +1,14 @@
 {
   "JavCloudDownload": {
     "name": "番号云下载",
-    "description": "按番号从 JavBus / JavRanking 取种，经 CloudDrive2 提交 115 离线下载；完成后清理、按番号[-C] 重命名，可选洗版、主动低清扫库并移动到 Emby 库目录。",
-    "version": "0.9.0",
+    "description": "按番号从 JavBus / JavRanking / JavDB 取种，经 CloudDrive2 提交 115 离线下载；完成后清理、按番号[-C] 重命名，可选洗版、主动低清扫库并移动到 Emby 库目录。",
+    "version": "0.9.1",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "CRY1221",
     "level": 1,
     "system_version": ">=3.1.8",
     "history": {
+      "v0.9.1": "新增 JavDB 种子源：设置页可填 Cookie（需含 cf_clearance），与 JavBus / JavRanking 并行抓取并按 infoHash 合并；JavDB 对 FC2 的磁力名称只有番号，按体积参与选种；FC2 番号统一成 FC2-PPV-xxxxxxx，不再拆成 FC-2-xxxxxxx。",
       "v0.9.0": "选种改为分辨率优先 4K > 2K > 1080P > 720P，同档中字优先再按体积，未知分辨率按 1080P 档；排除无码破解、AI 拉伸/修复、假 4K、480P 及以下、小于 2GB 的候选，720P 保留垫底；新增候选最小体积设置（默认 2048MB）；新增待提交队列（上限 1000，每轮 5 条）与批次汇总通知；新增助手工具 javcloud_submit / javcloud_tasks；JavRanking 遇 Cloudflare 挑战用 cloakbrowser 取票复用。",
       "v0.8.0": "主动洗版改为一次性扫库：汇总通知低清数量并列出前 5 条，忽略后不再提醒；普通下载不再跑 ffprobe；选种移除第一会所优先，改为中文字幕（体积≥最大候选一半）> 4K > 体积，排除 480P；重命名改为番号[-C]，多段使用 part1/part2。",
       "v0.6.8": "修复整理后残留空目录；落盘失败前强制刷新 CD2 目录；通知区分下载完成与整理失败；超时换种自动清理 115 离线任务记录。",

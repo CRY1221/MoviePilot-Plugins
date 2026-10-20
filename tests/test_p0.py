@@ -34,7 +34,7 @@ else:  # pragma: no cover - 仓库布局变化时给出明确提示
 TMP = tempfile.mkdtemp(prefix="jcd-pkg-")
 PKG = Path(TMP) / "jcd"
 PKG.mkdir()
-for name in ("__init__.py", "cd2.py", "javranking.py", "library.py", "pipeline.py", "selector.py", "source.py", "throttle.py", "pyproject.toml"):
+for name in ("__init__.py", "cd2.py", "javdb.py", "javranking.py", "library.py", "pipeline.py", "selector.py", "source.py", "throttle.py", "pyproject.toml"):
     shutil.copy(SRC / name, PKG / name)
 
 
@@ -1420,6 +1420,70 @@ check("JavRanking：解析磁力块",
       len(_parsed) == 1 and _parsed[0]["info_hash"] == "d" * 40
       and _parsed[0]["size_bytes"] > 0,
       str(_parsed))
+
+# ---------- JavDB 来源 ----------
+
+check("JavDB：FC2 番号归一化",
+      source.normalize_code("FC2-PPV-3121790") == "FC2-PPV-3121790",
+      source.normalize_code("FC2-PPV-3121790"))
+check("JavDB：FC2 短写法归一化",
+      source.normalize_code("fc2 3121790") == "FC2-PPV-3121790",
+      source.normalize_code("fc2 3121790"))
+check("JavDB：普通番号不受影响",
+      source.normalize_code("ssis-588") == "SSIS-588",
+      source.normalize_code("ssis-588"))
+
+_cookie = jcd.javdb.parse_cookie("a=1; cf_clearance=xyz; bad; c=x=y")
+check("JavDB：Cookie 解析", _cookie.get("cf_clearance") == "xyz" and _cookie.get("c") == "x=y", str(_cookie))
+
+_search_html = (
+    '<div class="item"><a href="/v/rmwGRv" class="box" title="T">'
+    '<div class="cover "><img loading="lazy" src="https://c0.jdbstatic.com/covers/rm/rmwGRv.jpg" /></div>'
+    '<div class="video-title"><strong>FC2-3363283</strong> 港区女子 VS 容疑者K。</div></a></div>'
+)
+_parsed_search = jcd.javdb.parse_search(_search_html)
+check("JavDB：解析搜索结果",
+      len(_parsed_search) == 1 and _parsed_search[0]["code"] == "FC2-3363283"
+      and _parsed_search[0]["href"] == "/v/rmwGRv"
+      and _parsed_search[0]["cover"].endswith("rmwGRv.jpg"),
+      str(_parsed_search))
+
+_detail_html = (
+    '<h2 class="title is-4"><strong>FC2-3363283</strong> 港区女子 VS 容疑者K。</h2>'
+    '<div class="column column-video-cover"><img src="https://c0.jdbstatic.com/covers/rm/rmwGRv.jpg"></div>'
+    '<a href="magnet:?xt=urn:btih:' + "e" * 40 + '&amp;dn=[javdb.com]FC2-3363283" title="x">'
+    '<span class="name">FC2-3363283</span><span class="meta">14.16GB, 6個文件</span></a>'
+)
+_info = jcd.javdb.parse_detail(_detail_html)
+check("JavDB：解析详情标题与封面",
+      _info["code"] == "FC2-3363283" and _info["title"].startswith("港区女子")
+      and _info["cover"].endswith("rmwGRv.jpg"), str(_info))
+_magnets = jcd.javdb.parse_magnets(_detail_html)
+check("JavDB：解析磁力块",
+      len(_magnets) == 1 and _magnets[0]["info_hash"] == "e" * 40
+      and _magnets[0]["size_bytes"] > 14 * 1024 ** 3
+      and _magnets[0]["name"] == "FC2-3363283", str(_magnets))
+
+_orig_javdb_detail = jcd.javdb.JavDBSource.fetch_detail
+jcd.javdb.JavDBSource.fetch_detail = lambda self, code: {
+    "code": code, "title": "JavDB 标题", "release_date": "", "duration": "",
+    "detail_url": "", "source": "javdb", "magnets": [
+        {"name": code, "size_text": "14.16GB", "size_bytes": 15204352000, "date": "",
+         "magnet": "magnet:?xt=urn:btih:" + "e" * 40, "info_hash": "e" * 40},
+    ],
+}
+try:
+    inst6 = jcd.JavCloudDownload()
+    inst6._use_javbus = False
+    inst6._use_javranking = False
+    inst6._use_javdb = True
+    inst6._javdb_cookie = "cf_clearance=x"
+    _jdb_detail = inst6._fetch_detail("FC2-3363283")
+    check("数据源：仅 JavDB 取种",
+          _jdb_detail.get("source") == "javdb"
+          and len(_jdb_detail.get("magnets") or []) == 1, str(_jdb_detail.get("source")))
+finally:
+    jcd.javdb.JavDBSource.fetch_detail = _orig_javdb_detail
 
 original = jcd.source.JavBusSource.fetch_detail
 def fake_fetch(self, code):
